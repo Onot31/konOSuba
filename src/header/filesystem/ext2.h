@@ -4,37 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include "header/driver/disk.h"   /* BLOCK_SIZE, struct BlockBuffer, read_blocks, write_blocks */
-
-/* =====================================================================
- *  EXT2 - IF2130 Edition : LAYOUT (keputusan Bagian B)
- *
- *  Disk 4 MiB, block 512 byte, 8 block group x 1024 block.
- *
- *  Block 0            : boot sector (fs_signature)
- *  Block 1            : superblock
- *  Block 2            : block group descriptor table (8 x 32 byte)
- *  Group 0            : block 3  = block bitmap
- *                       block 4  = inode bitmap
- *                       block 5..20 = inode table (16 block)
- *                       block 21.. = data   (block 21 = data root dir)
- *  Group g (g >= 1)   : block g*1024     = block bitmap
- *                       block g*1024 + 1 = inode bitmap
- *                       block g*1024 + 2 .. +17 = inode table
- *                       block g*1024 + 18 .. = data
- *
- *  - Inode 128 byte -> 4 inode / block -> 64 inode / group -> 512 inode total.
- *  - Nomor inode dimulai dari 1. Root = inode 1.
- *    Inode n berada di group (n-1)/64, index lokal (n-1)%64.
- *  - Bitmap: MSB-first (bit 0 = bit paling kiri byte 0), sama dengan sample image.
- *    Bit i pada block bitmap group g mewakili block g*1024 + i
- *    (block metadata ikut ditandai terpakai). Bit i pada inode bitmap group g
- *    mewakili inode lokal i (nomor inode = g*64 + i + 1).
- *  - Directory entry: header 8 byte (inode, rec_len, name_len, file_type) diikuti
- *    nama (tanpa NUL). rec_len = align4(8 + name_len). Entry terakhir berakhir
- *    saat rec_len == 0 atau offset mencapai akhir block. inode == 0 = entry kosong.
- *  - i_block: 12 direct, [12] indirect, [13] doubly-indirect, [14] triply-indirect.
- * ===================================================================== */
+#include "header/driver/disk.h"
 
 /* ===== Geometri disk ===== */
 #define EXT2_DISK_SPACE         4194304u
@@ -78,7 +48,6 @@
 
 /* ===== Struktur data ===== */
 
-/* Parameter untuk semua interface CRUD */
 struct EXT2DriverRequest {
     void     *buf;
     char     *name;
@@ -119,30 +88,28 @@ struct EXT2BlockGroupDescriptorTable {
     struct EXT2BlockGroupDescriptor table[EXT2_GROUPS_COUNT];
 } __attribute__((packed));
 
-/* Inode 128 byte. Offset i_size = 2, i_blocks = 28, i_block = 40 (sama dengan sample image). */
 struct EXT2Inode {
-    uint16_t i_mode;          /* offset   0 : EXT2_S_IFREG / EXT2_S_IFDIR          */
-    uint32_t i_size;          /* offset   2 : ukuran dalam byte                    */
-    uint32_t i_atime;         /* offset   6 : (tidak dipakai)                      */
-    uint32_t i_ctime;         /* offset  10 : (tidak dipakai)                      */
-    uint32_t i_mtime;         /* offset  14 : (tidak dipakai)                      */
-    uint32_t i_dtime;         /* offset  18 : (tidak dipakai)                      */
-    uint16_t i_gid;           /* offset  22 : (tidak dipakai)                      */
-    uint16_t i_links_count;   /* offset  24                                        */
-    uint16_t i_pad;           /* offset  26 : padding                              */
-    uint32_t i_blocks;        /* offset  28 : jumlah block 512-byte milik inode    */
-    uint32_t i_flags;         /* offset  32 : (tidak dipakai)                      */
-    uint32_t i_osd1;          /* offset  36 : (tidak dipakai)                      */
-    uint32_t i_block[15];     /* offset  40 : 12 direct + indirect + 2x + 3x       */
-    uint8_t  i_reserved[28];  /* offset 100 : padding sampai 128 byte              */
+    uint16_t i_mode;          
+    uint32_t i_size;          
+    uint32_t i_atime;         
+    uint32_t i_ctime;         
+    uint32_t i_mtime;         
+    uint32_t i_dtime;         
+    uint16_t i_gid;           
+    uint16_t i_links_count;   
+    uint16_t i_pad;           
+    uint32_t i_blocks;        
+    uint32_t i_flags;         
+    uint32_t i_osd1;          
+    uint32_t i_block[15];     
+    uint8_t  i_reserved[28];  
 } __attribute__((packed));
 
-/* Header directory entry (8 byte). Nama berada tepat setelah header. */
 struct EXT2DirectoryEntry {
-    uint32_t inode;       /* 0 = entry kosong */
-    uint16_t rec_len;     /* ukuran total entry, kelipatan 4 */
+    uint32_t inode;       
+    uint16_t rec_len;     
     uint8_t  name_len;
-    uint8_t  file_type;   /* EXT2_FT_* */
+    uint8_t  file_type;   
 } __attribute__((packed));
 
 _Static_assert(sizeof(struct EXT2Inode) == EXT2_INODE_SIZE, "EXT2Inode harus 128 byte");
@@ -151,68 +118,43 @@ _Static_assert(sizeof(struct EXT2BlockGroupDescriptorTable) <= BLOCK_SIZE, "BGD 
 _Static_assert(sizeof(struct EXT2Superblock) <= BLOCK_SIZE, "Superblock harus muat 1 block");
 _Static_assert(sizeof(struct EXT2DirectoryEntry) == EXT2_DIRENT_HEADER, "Header dirent harus 8 byte");
 
-/* 512 byte boot sector, isi sama dengan sample image di kit */
 extern const uint8_t fs_signature[BLOCK_SIZE];
 
-/* ===== Helper umum (dipakai bagian lain: allocator, write, delete) ===== */
-
-/* Nomor inode -> group dan index lokal (inode dimulai dari 1) */
+/* ===== Helper umum ===== */
 uint32_t inode_to_bgd(uint32_t inode);
 uint32_t inode_to_local(uint32_t inode);
 
-/* Directory entry */
 char    *get_entry_name(struct EXT2DirectoryEntry *entry);
-uint16_t get_entry_record_len(uint8_t name_len);   /* align4(8 + name_len) */
+uint16_t get_entry_record_len(uint8_t name_len);
 
-/* Bitmap (MSB-first) */
 bool bitmap_test(const uint8_t *bitmap, uint32_t bit);
 void bitmap_set(uint8_t *bitmap, uint32_t bit);
 void bitmap_clear(uint8_t *bitmap, uint32_t bit);
 
-/* Inode. read_inode() gagal (false) jika inode di luar 1..512 atau bit inode bitmap = 0 */
 bool read_inode(uint32_t inode, struct EXT2Inode *out);
 bool write_inode(uint32_t inode, const struct EXT2Inode *in);
 
-/* Block ke-index dari data sebuah inode (direct/indirect/doubly/triply). 0 = tidak ada */
 uint32_t get_inode_block(const struct EXT2Inode *inode, uint32_t index);
 
-/* Cari entry bernama `name` di dalam direktori `dir_inode` (semua block direktori) */
 bool find_directory_entry(uint32_t dir_inode, const char *name, uint8_t name_len,
                           uint32_t *out_inode, uint8_t *out_type);
 
-/* Tulis superblock dan BGD table (state di memori) ke disk */
 void commit_metadata(void);
+
+/* ===== Allocator API ===== */
+uint32_t allocate_block(uint32_t preferred_bgd);
+bool     free_block(uint32_t block);
+uint32_t allocate_inode(uint32_t preferred_bgd, bool is_dir);
+bool     free_inode(uint32_t inode);
 
 /* ===== Interface wajib ===== */
 bool is_empty_storage(void);
 void create_ext2(void);
 void initialize_filesystem_ext2(void);
 
-/**
- * read: membaca file `name` di folder `parent_inode` ke `buf`.
- *  0 sukses | 1 bukan file | 2 buffer tidak cukup | 3 file tidak ditemukan
- *  4 parent invalid | -1 error lain
- */
 int8_t read(struct EXT2DriverRequest request);
-
-/**
- * read_directory: membaca seluruh tabel entry folder `name` ke `buf`
- * (jumlah block folder x 512 byte).
- *  0 sukses | 1 bukan folder | 2 folder tidak ditemukan | 3 parent invalid
- *  -1 error lain (termasuk buffer < ukuran tabel folder)
- */
 int8_t read_directory(struct EXT2DriverRequest *prequest);
-
-/**
- * write: menulis file/folder.  (BAGIAN D)
- *  0 sukses | 1 nama sudah ada | 2 parent invalid | -1 error lain
- */
 int8_t write(struct EXT2DriverRequest *request);
-
-/**
- * delete: menghapus file/folder.  (BAGIAN C)
- *  0 sukses | 1 tidak ditemukan | 2 folder tidak kosong | 3 parent invalid | -1 error lain
- */
 int8_t delete(struct EXT2DriverRequest request);
 
 #endif
