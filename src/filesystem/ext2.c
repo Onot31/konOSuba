@@ -671,6 +671,160 @@ int8_t delete(struct EXT2DriverRequest request) {
 
 /* TODO(D): tulis file/folder */
 int8_t write(struct EXT2DriverRequest *request) {
-    (void) request;
-    return -1;
+    if (request == NULL) return -1;
+    
+    struct EXT2Inode parent;
+    if (!read_inode(request->parent_inode, &parent)) return 2;
+    if ((parent.i_mode & EXT2_S_IFMT) != EXT2_S_IFDIR) return 2; 
+
+    uint32_t existing_inode;
+    if (find_directory_entry(request->parent_inode, request->name, request->name_len, &existing_inode, NULL)) {
+        return 1; 
+    }
+    
+    uint32_t preferred_bgd = inode_to_bgd(request->parent_inode);
+    uint32_t new_inode_num = allocate_inode(preferred_bgd, request->is_directory);
+    if (new_inode_num == 0) return -1; 
+
+    struct EXT2Inode new_inode;
+    memset(&new_inode, 0, sizeof(new_inode));
+    new_inode.i_mode = request->is_directory ? EXT2_S_IFDIR : EXT2_S_IFREG;
+    new_inode.i_links_count = request->is_directory ? 2 : 1;
+    new_inode.i_size = request->is_directory ? EXT2_BLOCK_SIZE : request->buffer_size;
+ 
+    uint32_t blocks_needed = request->is_directory ? 1 : (request->buffer_size + EXT2_BLOCK_SIZE - 1) / EXT2_BLOCK_SIZE;
+    if (blocks_needed > EXT2_DIRECT_BLOCKS) {
+        
+        
+        return -1; 
+    }
+
+    uint8_t *src_buf = (uint8_t *)request->buf;
+    uint32_t remaining = request->buffer_size;
+
+    for (uint32_t i = 0; i < blocks_needed; i++) {
+        uint32_t lba = allocate_block(preferred_bgd);
+        if (lba == 0) return -1;
+        
+        new_inode.i_block[i] = lba;
+        new_inode.i_blocks++;
+
+        if (request->is_directory) {
+            struct BlockBuffer dir_buf;
+            memset(&dir_buf, 0, sizeof(dir_buf));
+            
+            
+            struct EXT2DirectoryEntry dot = {
+                .inode = new_inode_num, .rec_len = get_entry_record_len(1),
+                .name_len = 1, .file_type = EXT2_FT_DIR
+            };
+            
+            struct EXT2DirectoryEntry dotdot = {
+                .inode = request->parent_inode, .rec_len = get_entry_record_len(2),
+                .name_len = 2, .file_type = EXT2_FT_DIR
+            };
+            
+            memcpy(dir_buf.buf, &dot, EXT2_DIRENT_HEADER);
+            memcpy(dir_buf.buf + EXT2_DIRENT_HEADER, ".", 1);
+            memcpy(dir_buf.buf + dot.rec_len, &dotdot, EXT2_DIRENT_HEADER);
+            memcpy(dir_buf.buf + dot.rec_len + EXT2_DIRENT_HEADER, "..", 2);
+            
+            write_blocks(&dir_buf, lba, 1);
+        } else {
+            struct BlockBuffer file_buf;
+            memset(&file_buf, 0, sizeof(file_buf));
+            uint32_t chunk_size = remaining < EXT2_BLOCK_SIZE ? remaining : EXT2_BLOCK_SIZE;
+            
+            if (chunk_size > 0 && src_buf != NULL) {
+                memcpy(file_buf.buf, src_buf + (i * EXT2_BLOCK_SIZE), chunk_size);
+                remaining -= chunk_size;
+            }
+            write_blocks(&file_buf, lba, 1);
+        }
+    }
+    write_inode(new_inode_num, &new_inode);
+
+    uint32_t parent_blocks = (parent.i_size + EXT2_BLOCK_SIZE - 1) / EXT2_BLOCK_SIZE;
+    if (parent_blocks == 0) parent_blocks = parent.i_blocks;
+    
+    uint16_t req_rec_len = get_entry_record_len(request->name_len);
+    bool entry_added = false;
+    
+    for (uint32_t b = 0; b < parent_blocks && !entry_added; b++) {
+        uint32_t lba = get_inode_block(&parent, b);
+        if (lba == 0) continue;
+        
+        struct BlockBuffer pbuf;
+        read_blocks(&pbuf, lba, 1);
+        
+        uint32_t offset = 0;
+        while (offset + EXT2_DIRENT_HEADER <= EXT2_BLOCK_SIZE) {
+            struct EXT2DirectoryEntry *e = (struct EXT2DirectoryEntry *)(pbuf.buf + offset);
+            
+            if (e->rec_len < EXT2_DIRENT_HEADER) {
+                e->rec_len = EXT2_BLOCK_SIZE - offset;
+                e->inode = 0; // Pastikan statusnya dihapus/kosong
+            }
+
+            if (e->inode == 0) {
+                
+                if (e->rec_len >= req_rec_len) {
+                    e->inode = new_inode_num;
+                    e->name_len = request->name_len;
+                    e->file_type = request->is_directory ? EXT2_FT_DIR : EXT2_FT_REG_FILE;
+                    memcpy(pbuf.buf + offset + EXT2_DIRENT_HEADER, request->name, request->name_len);
+                    write_blocks(&pbuf, lba, 1);
+                    entry_added = true;
+                    break;
+                }
+            } else {
+                
+                uint16_t actual_len = get_entry_record_len(e->name_len);
+                if (e->rec_len >= actual_len + req_rec_len) {
+                    uint16_t total_len = e->rec_len;
+                    e->rec_len = actual_len; 
+                    
+                    struct EXT2DirectoryEntry *new_e = (struct EXT2DirectoryEntry *)(pbuf.buf + offset + actual_len);
+                    new_e->inode = new_inode_num;
+                    new_e->rec_len = total_len - actual_len; 
+                    new_e->name_len = request->name_len;
+                    new_e->file_type = request->is_directory ? EXT2_FT_DIR : EXT2_FT_REG_FILE;
+                    memcpy(pbuf.buf + offset + actual_len + EXT2_DIRENT_HEADER, request->name, request->name_len);
+                    
+                    write_blocks(&pbuf, lba, 1);
+                    entry_added = true;
+                    break;
+                }
+            }
+            offset += e->rec_len;
+        }
+    }
+
+    
+    if (!entry_added) {
+        if (parent_blocks >= EXT2_DIRECT_BLOCKS) return -1; 
+        
+        uint32_t new_lba = allocate_block(preferred_bgd);
+        if (new_lba == 0) return -1;
+        
+        parent.i_block[parent_blocks] = new_lba;
+        parent.i_blocks++;
+        parent.i_size += EXT2_BLOCK_SIZE;
+        
+        struct BlockBuffer pbuf;
+        memset(&pbuf, 0, sizeof(pbuf));
+        struct EXT2DirectoryEntry *new_e = (struct EXT2DirectoryEntry *)pbuf.buf;
+        new_e->inode = new_inode_num;
+        new_e->rec_len = EXT2_BLOCK_SIZE;
+        new_e->name_len = request->name_len;
+        new_e->file_type = request->is_directory ? EXT2_FT_DIR : EXT2_FT_REG_FILE;
+        memcpy(pbuf.buf + EXT2_DIRENT_HEADER, request->name, request->name_len);
+        
+        write_blocks(&pbuf, new_lba, 1);
+    }
+
+    write_inode(request->parent_inode, &parent);
+    commit_metadata();
+    
+    return 0;
 }
