@@ -6,6 +6,7 @@
 #include "header/driver/framebuffer.h"
 #include "header/driver/keyboard.h"
 #include "header/kernel-entrypoint.h"
+#include "header/filesystem/ext2.h"
 
 void kernel_setup(void) {
     // Chapter 0
@@ -38,4 +39,7 @@ void kernel_setup(void) {
             framebuffer_set_cursor(row, col);
         }
     }
+
+    // Initialize filesystem
+    initialize_filesystem_ext2();
 }
