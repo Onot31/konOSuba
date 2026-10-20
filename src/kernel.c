@@ -21,6 +21,11 @@ void kernel_setup(void) {
     framebuffer_clear();
     framebuffer_set_cursor(0, 0);
     
+    // disk image & driver test
+    struct BlockBuffer b;
+    for (int i = 0; i < 512; i++) b.buf[i] = i % 16;
+    write_blocks(&b, 17, 1);
+
     // Chapter 1: Keyboard Loop
     int row = 0, col = 0;
     keyboard_state_activate();
