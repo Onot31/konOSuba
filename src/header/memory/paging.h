@@ -1,7 +1,6 @@
 #ifndef _PAGING_H
 #define _PAGING_H
 
-#include <cstdint>
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -107,8 +106,7 @@ struct PageTableEntry {
     struct PageTableEntryFlag flag;
     uint16_t global_page      : 1;
     uint16_t ignored          : 3;
-    uint16_t higher_address   : 4;
-    uint16_t lower_address    : 16;
+    uint32_t page_address     : 20;
 }__attribute__((packed));
 /**
  * Page Directory, contain array of PageDirectoryEntry.
@@ -121,14 +119,14 @@ struct PageTableEntry {
  * @param table Fixed-width array of PageDirectoryEntry with size PAGE_ENTRY_COUNT
  */
 struct PageDirectory {
-    PageDirectoryEntry table[PAGE_ENTRY_COUNT];
+    struct PageDirectoryEntry table[PAGE_ENTRY_COUNT];
 }__attribute__((packed));
 
 /**
  *  Page Table, contain array of PageTableEntry
  */
 struct PageTable {
-    PageTableEntry table[PAGE_ENTRY_COUNT]; // idk if this uses PAGE_ENTRY_COUNT or not
+    struct PageTableEntry table[PAGE_ENTRY_COUNT];
 }__attribute__((packed));
 
 /**
@@ -159,7 +157,7 @@ void update_page_directory_entry(
     struct PageDirectory *page_dir,
     void *physical_addr, 
     void *virtual_addr, 
-    struct PageDirectoryEntryFlag flag
+    struct PageTableEntryFlag flag
 );
 
 /**
@@ -208,5 +206,4 @@ bool paging_allocate_user_page_frame(struct PageDirectory *page_dir, void *virtu
  * @return              Will return true if success, false otherwise
  */
 bool paging_free_user_page_frame(struct PageDirectory *page_dir, void *virtual_addr);
-
 #endif
