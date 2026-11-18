@@ -4,6 +4,7 @@ global set_tss_register              ; set tss register to GDT entry
 extern kernel_setup                  ; kernel C entrypoint
 extern _paging_kernel_page_directory ; kernel page directory
 extern _paging_kernel_page_table     ; kernel page table
+global kernel_execute_user_program
 
 KERNEL_VIRTUAL_BASE equ 0xC0000000    ; kernel virtual memory
 KERNEL_STACK_SIZE   equ 2097152       ; size of stack in bytes
@@ -102,4 +103,21 @@ set_tss_register:
     mov ax, 0x28 | 0 ; GDT TSS Selector, ring 0
     ltr ax
     ret
+
+kernel_execute_user_program:
+    mov eax, 0x20 | 0x3
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ecx, [esp + 4]
+    push eax
+    mov eax, ecx
+    add eax, 0x400000 - 4
+    push eax
+    pushfd
+    mov eax, 0x18 | 0x3
+    push eax
+    push ecx
+    iret
 
