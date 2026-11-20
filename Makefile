@@ -16,7 +16,7 @@ AFLAGS        = -f elf32 -g -F dwarf
 LFLAGS        = -T $(SOURCE_FOLDER)/linker.ld -melf_i386
 
 # Targets
-run: all disk
+run: all $(OUTPUT_FOLDER)/$(DISK_NAME).bin
 	@qemu-system-i386 -s -S -drive file=$(OUTPUT_FOLDER)/$(DISK_NAME).bin,format=raw,if=ide,index=0,media=disk -cdrom $(OUTPUT_FOLDER)/$(ISO_NAME).iso
 
 all: build
@@ -54,3 +54,9 @@ iso: kernel
 
 disk:
 	@qemu-img create -f raw $(OUTPUT_FOLDER)/$(DISK_NAME).bin 4M
+
+# Disk dibuat hanya jika belum ada, sehingga isi file system tetap tersimpan antar run.
+# Gunakan "make disk" untuk mengosongkan disk.
+$(OUTPUT_FOLDER)/$(DISK_NAME).bin:
+	@mkdir -p $(OUTPUT_FOLDER)
+	@qemu-img create -f raw $@ 4M
