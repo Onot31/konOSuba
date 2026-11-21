@@ -4,6 +4,13 @@
 #include "header/stdlib/string.h"
 #include "header/memory/paging.h"
 
+static void pde_set_frame(struct PageDirectoryEntry *entry, uint32_t frame) {
+    uint32_t raw;
+    memcpy(&raw, entry, sizeof(raw));
+    raw = (raw & 0xFFFu) | (frame << 12);
+    memcpy(entry, &raw, sizeof(raw));
+}
+
 /**
  * _paging_kernel_page_directory and _paging_kernel_page_table is initialized on kernel-entrypoint.s
  */
@@ -43,7 +50,7 @@ struct PageTable *paging_get_page_table(struct PageDirectory *page_dir, uint32_t
                 .write_bit = true,
                 .user_bit = true,
             };
-            dir_entry->page_attr_table = page_frame_number;
+            pde_set_frame(dir_entry, page_frame_number);
             struct PageTable *page_table = (struct PageTable *)(RECURSIVE_PAGE_TABLES_VIRTUAL_ADDRESS + page_directory_index * PAGE_FRAME_SIZE);
             flush_single_tlb(page_table);
             memset(page_table, 0, PAGE_FRAME_SIZE);
@@ -103,6 +110,17 @@ bool paging_allocate_user_page_frame(struct PageDirectory *page_dir, void *virtu
         return false;
     }
 
+    // tolak address kernel (higher half & recursive mapping) dan address yang sudah terpetakan
+    if ((uint32_t) virtual_addr >= 0xC0000000u) {
+        return false;
+    }
+    uint32_t page_directory_index = ((uint32_t)virtual_addr >> 22) & 0x3FF;
+    uint32_t page_table_index = ((uint32_t)virtual_addr >> 12) & 0x3FF;
+    struct PageTable *page_table = paging_get_page_table(page_dir, page_directory_index);
+    if (page_table == NULL || page_table->table[page_table_index].flag.present_bit) {
+        return false;
+    }
+
     // Find free physical frame in page_manager_state.page_frame_map[]
     uint32_t map_index = KERNEL_RESERVED_PAGE_FRAME_COUNT;
     while (page_manager_state.page_frame_map[map_index] != 0 && map_index < PAGE_FRAME_MAX_COUNT) {
@@ -122,9 +140,9 @@ bool paging_allocate_user_page_frame(struct PageDirectory *page_dir, void *virtu
         .write_bit = true,
         .user_bit = true
     };
-    void *physical_addr = (uint32_t *) 0x400000 + map_index * PAGE_FRAME_SIZE;
+    void *physical_addr = (void *) (map_index * PAGE_FRAME_SIZE);
 
-    update_page_directory_entry(page_dir, &physical_addr, virtual_addr, flag);
+    update_page_directory_entry(page_dir, physical_addr, virtual_addr, flag);
     
     return true;
 }
@@ -148,7 +166,7 @@ bool paging_free_user_page_frame(struct PageDirectory *page_dir, void *virtual_a
     uint32_t physical_address = page_table->table[page_table_index].page_address << 12;
     if (physical_address < 0x400000) return false;
 
-    uint32_t map_index = ((physical_address - 0x400000) / PAGE_FRAME_SIZE);
+    uint32_t map_index = physical_address / PAGE_FRAME_SIZE;
     if (map_index >= PAGE_FRAME_MAX_COUNT) return false;
 
     // remove frame 

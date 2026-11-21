@@ -12,4 +12,7 @@
  */
 extern void load_gdt(struct GDTR *gdtr);
 
+extern void set_tss_register(void);
+extern void kernel_execute_user_program(void *virtual_addr);
+
 #endif

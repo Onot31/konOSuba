@@ -15,6 +15,7 @@ void kernel_setup(void) {
     // Chapter 1: Interrupt
     pic_remap();
     initialize_idt();
+    initialize_filesystem_ext2();
     activate_keyboard_interrupt();
     
     // Chapter 1: Framebuffer
@@ -22,29 +23,19 @@ void kernel_setup(void) {
     framebuffer_set_cursor(0, 0);
     
     // disk image & driver test
-    struct BlockBuffer b;
-    for (int i = 0; i < 512; i++) b.buf[i] = i % 16;
-    write_blocks(&b, 17, 1);
 
     // Chapter 1: Keyboard Loop
-    int row = 0, col = 0;
+    //int row = 0, col = 0;
     keyboard_state_activate();
     
-    while (true) {
-        char c;
-        get_keyboard_buffer(&c);
-        if (c) {
-            framebuffer_write(row, col, c, 0xF, 0); // White text, black bg
-            if (col >= FRAMEBUFFER_WIDTH - 1) {
-                ++row;
-                col = 0;
-            } else {
-                ++col;
-            }
-            framebuffer_set_cursor(row, col);
-        }
-    }
+    struct EXT2DriverRequest req = {
+            .buf          = "haihai",
+            .name         = "tes123",
+            .name_len     = 2,
+            .parent_inode = 1,
+            .buffer_size  = 100,                  
+            .is_directory = false
+        };
 
-    // Initialize filesystem
-    initialize_filesystem_ext2();
+    write(&req);
 }

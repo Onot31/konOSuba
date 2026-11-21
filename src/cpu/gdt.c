@@ -1,8 +1,9 @@
 #include "header/cpu/gdt.h"
+#include "header/cpu/interrupt.h"
 
 /**
  * global_descriptor_table, predefined GDT.
- * Entry: [0] Null, [1] Kernel Code, [2] Kernel Data
+ * Entry: Null, Kernel Code, Kernel Data, User Code, User Data, TSS
  */
 struct GlobalDescriptorTable global_descriptor_table = {
     .table = {
@@ -38,9 +39,42 @@ struct GlobalDescriptorTable global_descriptor_table = {
             .opr_32_bit = 1,       // 1: 32-bit protected mode
             .granularity = 1,      // 1: 4KB granularity
             .base_high = 0
+        },
+        {
+            .segment_low = 0xFFFF,
+            .segment_high = 0xF,
+            .type_bit = 0xA,
+            .non_system = 1,
+            .privilege = 3,
+            .valid_bit = 1,
+            .opr_32_bit = 1,
+            .granularity = 1,
+        },
+        {
+            .segment_low = 0xFFFF,
+            .segment_high = 0xF,
+            .type_bit = 0x2,
+            .non_system = 1,
+            .privilege = 3,
+            .valid_bit = 1,
+            .opr_32_bit = 1,
+            .granularity = 1,
+        },
+        {
+            .segment_low = sizeof(struct TSSEntry) - 1,
+            .segment_high = ((sizeof(struct TSSEntry) - 1) >> 16) & 0xF,
+            .type_bit = 0x9,
+            .valid_bit = 1,
         }
     }
 };
+
+void gdt_install_tss(void) {
+    uint32_t base = (uint32_t) &_interrupt_tss_entry;
+    global_descriptor_table.table[5].base_high = (base & (0xFFu << 24)) >> 24;
+    global_descriptor_table.table[5].base_mid = (base & (0xFFu << 16)) >> 16;
+    global_descriptor_table.table[5].base_low = base & 0xFFFF;
+}
 
 /**
  * _gdt_gdtr, predefined system GDTR.
