@@ -64,6 +64,22 @@ user-shell:
 	@size --target=binary $(OUTPUT_FOLDER)/shell
 	@rm -f *.o
 
+USER_APP_NAMES = hello-world counter clock
+USER_APP_BINS  = $(addprefix $(OUTPUT_FOLDER)/,$(USER_APP_NAMES))
+
+user-apps: $(USER_APP_BINS)
+
+$(USER_APP_BINS): $(OUTPUT_FOLDER)/%: $(SOURCE_FOLDER)/user-%.c $(SOURCE_FOLDER)/crt0.s $(SOURCE_FOLDER)/user-linker.ld
+	@mkdir -p $(OUTPUT_FOLDER)
+	@$(ASM) $(AFLAGS) $(SOURCE_FOLDER)/crt0.s -o $(OUTPUT_FOLDER)/crt0-$*.o
+	@$(CC) $(CFLAGS) -fno-pie $< -o $(OUTPUT_FOLDER)/$*.o
+	@$(LIN) -T $(SOURCE_FOLDER)/user-linker.ld -melf_i386 --oformat=binary $(OUTPUT_FOLDER)/crt0-$*.o $(OUTPUT_FOLDER)/$*.o -o $@
+	@echo Linking $* object files and generate flat binary...
+	@$(LIN) -T $(SOURCE_FOLDER)/user-linker.ld -melf_i386 --oformat=elf32-i386 $(OUTPUT_FOLDER)/crt0-$*.o $(OUTPUT_FOLDER)/$*.o -o $@_elf
+	@echo Linking $* object files and generate ELF32 for debugging...
+	@rm -f $(OUTPUT_FOLDER)/crt0-$*.o $(OUTPUT_FOLDER)/$*.o
+	@size --target=binary $@
+
 disk:
 	@qemu-img create -f raw $(OUTPUT_FOLDER)/$(DISK_NAME).bin 4M
 

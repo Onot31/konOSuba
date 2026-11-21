@@ -1,26 +1,19 @@
 /*
- * konOSuba shell - user mode (Chapter 3, bagian D).
+ * konOSuba shell - user mode (Chapter 3 & 4, bagian D).
  *
  * ABI syscall mengikuti buku IF2130 edisi 4, bagian 3.4.1.1:
  *   eax = nomor layanan, ebx/ecx/edx = argumen.
  *   0 read(request*, int8_t* retcode), 1 read_directory(...), 2 write(...),
  *   3 delete(...), 4 getchar(char*), 5 putchar(char, color),
  *   6 puts(char*, count, color), 7 keyboard activate.
+ * Layanan process management bab 4 didefinisikan pada header/syscall.h.
  */
 
 #include <stdint.h>
 #include <stdbool.h>
 #include "header/filesystem/ext2.h"
 #include "header/stdlib/string.h"
-
-#define SYS_READ                 0
-#define SYS_READ_DIRECTORY       1
-#define SYS_WRITE                2
-#define SYS_DELETE               3
-#define SYS_GETCHAR              4
-#define SYS_PUTCHAR              5
-#define SYS_PUTS                 6
-#define SYS_KEYBOARD_ACTIVATE    7
+#include "header/syscall.h"
 
 #define COLOR_DEFAULT  0x07
 #define COLOR_PATH     0x0B
@@ -37,6 +30,11 @@
 #define FILE_BUFFER_SIZE  (128u * EXT2_BLOCK_SIZE)
 #define IO_BUFFER_SIZE    FILE_BUFFER_SIZE
 #define FIND_QUEUE_MAX    128
+
+#define PATH_DIR_MAX      8
+#define PATH_STORE_NAME   "path"
+#define PATH_STORE_NAMELEN 4u
+#define PATH_DEFAULT_DIR  "/"
 
 struct PathRef {
     uint32_t parent_inode;
@@ -73,6 +71,12 @@ static uint8_t file_buffer[FILE_BUFFER_SIZE];
 static char    io_buffer[2][IO_BUFFER_SIZE];
 static char    line_buffer[LINE_MAX];
 static struct FindNode find_queue[FIND_QUEUE_MAX];
+
+static char     path_dirs[PATH_DIR_MAX][PATH_MAX_LEN];
+static char     path_temp[PATH_DIR_MAX][PATH_MAX_LEN];
+static uint32_t path_dir_count = 0;
+static char     path_store_buffer[PATH_DIR_MAX * (PATH_MAX_LEN + 1)];
+static struct ProcessInfo process_info_buffer[PROCESS_INFO_MAX];
 
 static int32_t syscall(uint32_t number, uint32_t a1, uint32_t a2, uint32_t a3) {
     int32_t result;
@@ -158,7 +162,7 @@ static void out_u32(struct Output *out, uint32_t value) {
 static void emit(const char *s, uint32_t n, uint8_t color) {
     while (n > 0) {
         uint32_t chunk = n < 2048u ? n : 2048u;
-        syscall(SYS_PUTS, (uint32_t)s, chunk, color);
+        syscall(SYSCALL_PUTS, (uint32_t)s, chunk, color);
         s += chunk;
         n -= chunk;
     }
@@ -178,7 +182,7 @@ static int8_t fs_read(uint32_t parent, const char *name, uint8_t name_len,
     request.buffer_size = size;
     request.is_directory = false;
 
-    int32_t eax = syscall(SYS_READ, (uint32_t)&request, (uint32_t)&retcode, 0);
+    int32_t eax = syscall(SYSCALL_FS_READ, (uint32_t)&request, (uint32_t)&retcode, 0);
     if (retcode != (int32_t)0x55555555) return (int8_t)retcode;
     return (int8_t)eax;
 }
@@ -196,7 +200,7 @@ static int8_t fs_read_dir(uint32_t inode) {
     request.buffer_size = DIR_BUFFER_SIZE;
     request.is_directory = true;
 
-    int32_t eax = syscall(SYS_READ_DIRECTORY, (uint32_t)&request, (uint32_t)&retcode, 0);
+    int32_t eax = syscall(SYSCALL_FS_READ_DIRECTORY, (uint32_t)&request, (uint32_t)&retcode, 0);
     if (retcode != (int32_t)0x55555555) return (int8_t)retcode;
     return (int8_t)eax;
 }
@@ -213,7 +217,7 @@ static int8_t fs_write(uint32_t parent, const char *name, uint8_t name_len,
     request.buffer_size = size;
     request.is_directory = is_directory;
 
-    int32_t eax = syscall(SYS_WRITE, (uint32_t)&request, (uint32_t)&retcode, 0);
+    int32_t eax = syscall(SYSCALL_FS_WRITE, (uint32_t)&request, (uint32_t)&retcode, 0);
     if (retcode != (int32_t)0x55555555) return (int8_t)retcode;
     return (int8_t)eax;
 }
@@ -230,7 +234,7 @@ static int8_t fs_delete(uint32_t parent, const char *name, uint8_t name_len,
     request.buffer_size = 0;
     request.is_directory = is_directory;
 
-    int32_t eax = syscall(SYS_DELETE, (uint32_t)&request, (uint32_t)&retcode, 0);
+    int32_t eax = syscall(SYSCALL_FS_DELETE, (uint32_t)&request, (uint32_t)&retcode, 0);
     if (retcode != (int32_t)0x55555555) return (int8_t)retcode;
     return (int8_t)eax;
 }
@@ -569,6 +573,170 @@ static bool is_descendant_dir(uint32_t ancestor_inode, uint32_t inode) {
         if (parent == inode) return false;
         inode = parent;
     }
+    return false;
+}
+
+/* ---------- PATH (bonus 4.3.5) ---------- */
+
+static bool s_starts_with(const char *s, const char *prefix) {
+    while (*prefix != '\0') {
+        if (*s != *prefix) return false;
+        s++;
+        prefix++;
+    }
+    return true;
+}
+
+static bool s_has_slash(const char *s) {
+    while (*s != '\0') {
+        if (*s == '/') return true;
+        s++;
+    }
+    return false;
+}
+
+static bool path_add_dir(const char *dir) {
+    char normalized[PATH_MAX_LEN];
+    uint32_t len = s_len(dir);
+    uint32_t i;
+
+    if (len == 0 || len >= PATH_MAX_LEN || dir[0] != '/') return false;
+    while (len > 1 && dir[len - 1] == '/') len--;
+    memcpy(normalized, dir, len);
+    normalized[len] = '\0';
+
+    for (i = 0; i < path_dir_count; i++)
+        if (s_cmp(path_dirs[i], normalized) == 0) return true;
+    if (path_dir_count >= PATH_DIR_MAX) return false;
+    s_copy(path_dirs[path_dir_count], normalized, PATH_MAX_LEN);
+    path_dir_count++;
+    return true;
+}
+
+static bool path_set_spec(const char *spec, bool append) {
+    uint32_t count = 0;
+    uint32_t base;
+    uint32_t added = 0;
+    const char *cursor = spec;
+    uint32_t i;
+
+    while (*cursor != '\0') {
+        const char *start = cursor;
+        uint32_t len;
+        char entry[PATH_MAX_LEN];
+
+        while (*cursor != '\0' && *cursor != ':') cursor++;
+        len = (uint32_t)(cursor - start);
+        if (*cursor == ':') cursor++;
+        if (len == 0 || len >= PATH_MAX_LEN || start[0] != '/') return false;
+        while (len > 1 && start[len - 1] == '/') len--;
+
+        memcpy(entry, start, len);
+        entry[len] = '\0';
+        for (i = 0; i < count; i++)
+            if (s_cmp(path_temp[i], entry) == 0) break;
+        if (i == count) {
+            if (count >= PATH_DIR_MAX) return false;
+            s_copy(path_temp[count], entry, PATH_MAX_LEN);
+            count++;
+        }
+    }
+
+    if (count == 0) return false;
+
+    base = append ? path_dir_count : 0;
+    for (i = 0; i < count; i++) {
+        uint32_t j;
+        for (j = 0; j < base; j++)
+            if (s_cmp(path_dirs[j], path_temp[i]) == 0) break;
+        if (j == base) added++;
+    }
+    if (base + added > PATH_DIR_MAX) return false;
+
+    if (!append) path_dir_count = 0;
+    for (i = 0; i < count; i++) {
+        uint32_t j;
+        for (j = 0; j < path_dir_count; j++)
+            if (s_cmp(path_dirs[j], path_temp[i]) == 0) break;
+        if (j < path_dir_count) continue;
+        s_copy(path_dirs[path_dir_count], path_temp[i], PATH_MAX_LEN);
+        path_dir_count++;
+    }
+    return path_dir_count > 0;
+}
+
+static void path_load(void) {
+    uint32_t len = 0;
+    uint32_t start = 0;
+    uint32_t i;
+
+    path_dir_count = 0;
+    if (read_file_entry(EXT2_ROOT_INODE, PATH_STORE_NAME, PATH_STORE_NAMELEN, &len) == 0
+        && len > 0) {
+        for (i = 0; i <= len; i++) {
+            if (i == len || file_buffer[i] == '\n') {
+                uint32_t end = i;
+                while (end > start && file_buffer[end - 1] == '\r') end--;
+                if (end > start) {
+                    char entry[PATH_MAX_LEN];
+                    uint32_t n = end - start;
+                    if (n < PATH_MAX_LEN) {
+                        memcpy(entry, file_buffer + start, n);
+                        entry[n] = '\0';
+                        path_add_dir(entry);
+                    }
+                }
+                start = i + 1;
+            }
+        }
+    }
+    if (path_dir_count == 0) path_add_dir(PATH_DEFAULT_DIR);
+}
+
+static int path_save(void) {
+    uint32_t i;
+    uint32_t len = 0;
+
+    for (i = 0; i < path_dir_count; i++) {
+        uint32_t n = s_len(path_dirs[i]);
+        if (len + n + 1 > sizeof(path_store_buffer)) return -1;
+        memcpy(path_store_buffer + len, path_dirs[i], n);
+        len += n;
+        path_store_buffer[len++] = '\n';
+    }
+
+    fs_delete(EXT2_ROOT_INODE, PATH_STORE_NAME, (uint8_t)PATH_STORE_NAMELEN, false);
+    return fs_write(EXT2_ROOT_INODE, PATH_STORE_NAME, (uint8_t)PATH_STORE_NAMELEN,
+                    path_store_buffer, len, false);
+}
+
+static void path_print(struct Output *out) {
+    uint32_t i;
+    out_str(out, "PATH=");
+    for (i = 0; i < path_dir_count; i++) {
+        if (i > 0) out_char(out, ':');
+        out_str(out, path_dirs[i]);
+    }
+    out_char(out, '\n');
+}
+
+static bool path_find_executable(const char *name, struct PathRef *out) {
+    uint32_t i;
+
+    if (name == NULL || name[0] == '\0') return false;
+
+    if (s_has_slash(name)) {
+        if (resolve_entry(name, out) != 0) return false;
+        return out->type != EXT2_FT_DIR;
+    }
+
+    for (i = 0; i < path_dir_count; i++) {
+        char full[PATH_MAX_LEN];
+        if (!join_path(full, path_dirs[i], name, s_len(name))) continue;
+        if (resolve_entry(full, out) == 0 && out->type != EXT2_FT_DIR) return true;
+    }
+
+    if (resolve_entry(name, out) == 0 && out->type != EXT2_FT_DIR) return true;
     return false;
 }
 
@@ -984,7 +1152,187 @@ static void cmd_grep(int argc, char **argv, const char *input, uint32_t input_le
 
 static void cmd_help(struct Output *out) {
     out_str(out, "built-in : cd ls mkdir cat cp rm mv find grep help\n");
+    out_str(out, "proses   : exec <aplikasi>  ps  kill <PID>\n");
+    out_str(out, "variabel : export PATH=<dir>[:<dir>...]  export PATH+=<dir>\n");
+    out_str(out, "aplikasi : jalankan lewat exec atau langsung namanya (dicari di PATH)\n");
     out_str(out, "pipeline : command1 | command2 | ...\n");
+}
+
+static void exec_entry(const struct PathRef *ref, struct Output *out) {
+    int32_t rc = syscall(SYSCALL_EXEC, ref->parent_inode,
+                         (uint32_t)ref->name, ref->name_len);
+
+    if (rc < 0) {
+        out_str(out, "exec: gagal membuat proses (kode ");
+        out_u32(out, (uint32_t)(-rc));
+        out_str(out, ")\n");
+        return;
+    }
+    out_str(out, "exec: proses ");
+    out_str_n(out, ref->name, ref->name_len);
+    out_str(out, " dijalankan\n");
+}
+
+static void cmd_exec(int argc, char **argv, struct Output *out) {
+    struct PathRef ref;
+
+    if (argc != 2) {
+        out_usage(out, "exec <nama_aplikasi>");
+        return;
+    }
+    if (!path_find_executable(argv[1], &ref)) {
+        out_str(out, "exec: ");
+        out_str(out, argv[1]);
+        out_str(out, ": aplikasi tidak ditemukan\n");
+        return;
+    }
+    exec_entry(&ref, out);
+}
+
+static uint32_t u32_width(uint32_t value) {
+    uint32_t width = 1;
+    while (value >= 10) {
+        value /= 10;
+        width++;
+    }
+    return width;
+}
+
+static uint32_t process_name_len(const struct ProcessInfo *info) {
+    uint32_t len = 0;
+    while (len < PROCESS_INFO_NAME_LEN && info->name[len] != '\0') len++;
+    return len;
+}
+
+static void cmd_ps(int argc, char **argv, struct Output *out) {
+    int32_t count;
+    int32_t i;
+
+    (void)argv;
+    if (argc != 1) {
+        out_usage(out, "ps");
+        return;
+    }
+
+    memset(process_info_buffer, 0, sizeof(process_info_buffer));
+    count = syscall(SYSCALL_PS, (uint32_t)process_info_buffer, PROCESS_INFO_MAX, 0);
+    if (count < 0) {
+        out_str(out, "ps: syscall info proses belum tersedia di kernel\n");
+        return;
+    }
+    if (count > PROCESS_INFO_MAX) count = PROCESS_INFO_MAX;
+
+    out_str(out, "PID  NAMA                STATE\n");
+    for (i = 0; i < count; i++) {
+        uint32_t j;
+        uint32_t name_len = process_name_len(&process_info_buffer[i]);
+
+        out_u32(out, process_info_buffer[i].pid);
+        for (j = u32_width(process_info_buffer[i].pid); j < 5; j++) out_char(out, ' ');
+        out_str_n(out, process_info_buffer[i].name, name_len);
+        for (j = name_len; j < 20; j++) out_char(out, ' ');
+
+        if (process_info_buffer[i].state == USER_PROCESS_STATE_RUNNING) out_str(out, "RUNNING\n");
+        else if (process_info_buffer[i].state == USER_PROCESS_STATE_READY) out_str(out, "READY\n");
+        else out_str(out, "INACTIVE\n");
+    }
+}
+
+static bool parse_pid(const char *text, uint32_t *out) {
+    uint32_t value = 0;
+
+    if (text == NULL || *text == '\0') return false;
+    while (*text != '\0') {
+        uint32_t digit;
+        if (*text < '0' || *text > '9') return false;
+        digit = (uint32_t)(*text - '0');
+        if (value > (0xFFFFFFFFu - digit) / 10u) return false;
+        value = value * 10u + digit;
+        text++;
+    }
+    *out = value;
+    return true;
+}
+
+static void cmd_kill(int argc, char **argv, struct Output *out) {
+    uint32_t pid;
+    int32_t count;
+    int32_t i;
+    int32_t rc;
+
+    if (argc != 2) {
+        out_usage(out, "kill <PID>");
+        return;
+    }
+    if (!parse_pid(argv[1], &pid)) {
+        out_str(out, "kill: PID tidak valid\n");
+        return;
+    }
+    if (pid == 0) {
+        out_str(out, "kill: proses init (PID 0) tidak boleh dihentikan\n");
+        return;
+    }
+
+    memset(process_info_buffer, 0, sizeof(process_info_buffer));
+    count = syscall(SYSCALL_PS, (uint32_t)process_info_buffer, PROCESS_INFO_MAX, 0);
+    if (count > 0) {
+        if (count > PROCESS_INFO_MAX) count = PROCESS_INFO_MAX;
+        for (i = 0; i < count; i++) {
+            if (process_info_buffer[i].pid == pid
+                && process_info_buffer[i].state == USER_PROCESS_STATE_RUNNING) {
+                out_str(out, "kill: tidak bisa menghentikan shell sendiri\n");
+                return;
+            }
+        }
+    }
+
+    rc = syscall(SYSCALL_KILL, pid, 0, 0);
+    if (rc < 0) {
+        out_str(out, "kill: gagal (PID tidak ditemukan atau syscall belum tersedia)\n");
+        return;
+    }
+    out_str(out, "kill: PID ");
+    out_u32(out, pid);
+    out_str(out, " dihentikan\n");
+}
+
+static void cmd_export(int argc, char **argv, struct Output *out) {
+    const char *spec;
+    bool append = false;
+    int rc;
+
+    if (argc == 1 || (argc == 2 && s_cmp(argv[1], "PATH") == 0)) {
+        path_print(out);
+        return;
+    }
+    if (argc != 2) {
+        out_usage(out, "export [PATH|PATH=<dir>[:...]|PATH+=<dir>]");
+        return;
+    }
+
+    if (s_starts_with(argv[1], "PATH+=")) {
+        append = true;
+        spec = argv[1] + 6;
+    } else if (s_starts_with(argv[1], "PATH=")) {
+        spec = argv[1] + 5;
+    } else {
+        out_str(out, "export: hanya variabel PATH yang didukung\n");
+        return;
+    }
+
+    if (!path_set_spec(spec, append)) {
+        out_str(out, "export: daftar direktori tidak valid\n");
+        return;
+    }
+
+    rc = path_save();
+    if (rc != 0) {
+        out_str(out, "export: PATH berubah di sesi ini, tetapi gagal disimpan (kode ");
+        out_u32(out, (uint32_t)(uint8_t)rc);
+        out_str(out, ")\n");
+        return;
+    }
+    path_print(out);
 }
 
 static void execute(int argc, char **argv, const char *input, uint32_t input_len,
@@ -1000,8 +1348,17 @@ static void execute(int argc, char **argv, const char *input, uint32_t input_len
     else if (s_cmp(argv[0], "mv") == 0) cmd_mv(argc, argv, out);
     else if (s_cmp(argv[0], "find") == 0) cmd_find(argc, argv, out);
     else if (s_cmp(argv[0], "grep") == 0) cmd_grep(argc, argv, input, input_len, out);
+    else if (s_cmp(argv[0], "exec") == 0) cmd_exec(argc, argv, out);
+    else if (s_cmp(argv[0], "ps") == 0) cmd_ps(argc, argv, out);
+    else if (s_cmp(argv[0], "kill") == 0) cmd_kill(argc, argv, out);
+    else if (s_cmp(argv[0], "export") == 0) cmd_export(argc, argv, out);
     else if (s_cmp(argv[0], "help") == 0) cmd_help(out);
     else {
+        struct PathRef ref;
+        if (path_find_executable(argv[0], &ref)) {
+            exec_entry(&ref, out);
+            return;
+        }
         out_str(out, argv[0]);
         out_str(out, ": command not found\n");
     }
@@ -1083,7 +1440,7 @@ static char get_char(void) {
     int32_t result;
 
     value.word = 0;
-    result = syscall(SYS_GETCHAR, (uint32_t)&value, 0, 0);
+    result = syscall(SYSCALL_GETCHAR, (uint32_t)&value, 0, 0);
 
     if (value.bytes[0] != 0) return value.bytes[0];
     if (result > 0 && result < 256) return (char)result;
@@ -1091,7 +1448,7 @@ static char get_char(void) {
 }
 
 static void echo_char(char c) {
-    syscall(SYS_PUTCHAR, (uint32_t)(unsigned char)c, COLOR_DEFAULT, 0);
+    syscall(SYSCALL_PUTCHAR, (uint32_t)(unsigned char)c, COLOR_DEFAULT, 0);
 }
 
 static uint32_t read_line(char *buffer, uint32_t capacity) {
@@ -1133,7 +1490,9 @@ int main(void) {
     cwd_inode = EXT2_ROOT_INODE;
     s_copy(cwd_path, "/", sizeof(cwd_path));
 
-    syscall(SYS_KEYBOARD_ACTIVATE, 0, 0, 0);
+    path_load();
+
+    syscall(SYSCALL_KEYBOARD_ACTIVATE, 0, 0, 0);
 
     emit("konOSuba shell\n", 15, COLOR_DEFAULT);
     emit("ketik 'help' untuk daftar perintah\n", 35, COLOR_DEFAULT);
