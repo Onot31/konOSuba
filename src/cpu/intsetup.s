@@ -45,7 +45,51 @@ ISR_ERRCODE 30
 ISR_NOERRCODE 31
 
 %assign i 32
-%rep 224
+%rep 16
+ISR_NOERRCODE i
+%assign i i+1
+%endrep
+
+isr_stub_48:
+    push 0
+    push 48
+
+    push ds
+    push es
+    push fs
+    push gs
+    push ebx
+    push ecx
+    push edx
+    push eax
+    push ebp
+    push esi
+    push edi
+
+    push esp        
+    extern syscall_dispatcher
+    call syscall_dispatcher
+    pop esp         
+
+    mov [esp+12], eax
+
+    pop edi
+    pop esi
+    pop ebp
+    pop eax        
+    pop edx
+    pop ecx
+    pop ebx
+    pop gs
+    pop fs
+    pop es
+    pop ds
+
+    add esp, 8      
+    iret
+
+%assign i 49
+%rep 207
 ISR_NOERRCODE i
 %assign i i+1
 %endrep
