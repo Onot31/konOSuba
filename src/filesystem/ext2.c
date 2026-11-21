@@ -693,36 +693,41 @@ int8_t write(struct EXT2DriverRequest *request) {
     new_inode.i_size = request->is_directory ? EXT2_BLOCK_SIZE : request->buffer_size;
  
     uint32_t blocks_needed = request->is_directory ? 1 : (request->buffer_size + EXT2_BLOCK_SIZE - 1) / EXT2_BLOCK_SIZE;
-    if (blocks_needed > EXT2_DIRECT_BLOCKS) {
-        
-        
-        return -1; 
-    }
+    
+    if (blocks_needed > EXT2_DIRECT_BLOCKS + (EXT2_BLOCK_SIZE / 4)) return -1; 
 
     uint8_t *src_buf = (uint8_t *)request->buf;
     uint32_t remaining = request->buffer_size;
+
+    struct BlockBuffer indirect_buf;
+    memset(&indirect_buf, 0, sizeof(indirect_buf));
+    uint32_t indirect_lba = 0;
 
     for (uint32_t i = 0; i < blocks_needed; i++) {
         uint32_t lba = allocate_block(preferred_bgd);
         if (lba == 0) return -1;
         
-        new_inode.i_block[i] = lba;
+        if (i < EXT2_DIRECT_BLOCKS) {
+            new_inode.i_block[i] = lba;
+        } else {
+            if (i == EXT2_DIRECT_BLOCKS) {
+                indirect_lba = allocate_block(preferred_bgd);
+                if (indirect_lba == 0) return -1;
+                new_inode.i_block[EXT2_DIRECT_BLOCKS] = indirect_lba;
+                new_inode.i_blocks++;
+            }
+            uint32_t indirect_index = i - EXT2_DIRECT_BLOCKS;
+            memcpy(indirect_buf.buf + (indirect_index * 4), &lba, 4);
+        }
+        
         new_inode.i_blocks++;
 
         if (request->is_directory) {
             struct BlockBuffer dir_buf;
             memset(&dir_buf, 0, sizeof(dir_buf));
             
-            
-            struct EXT2DirectoryEntry dot = {
-                .inode = new_inode_num, .rec_len = get_entry_record_len(1),
-                .name_len = 1, .file_type = EXT2_FT_DIR
-            };
-            
-            struct EXT2DirectoryEntry dotdot = {
-                .inode = request->parent_inode, .rec_len = get_entry_record_len(2),
-                .name_len = 2, .file_type = EXT2_FT_DIR
-            };
+            struct EXT2DirectoryEntry dot = { .inode = new_inode_num, .rec_len = get_entry_record_len(1), .name_len = 1, .file_type = EXT2_FT_DIR };
+            struct EXT2DirectoryEntry dotdot = { .inode = request->parent_inode, .rec_len = get_entry_record_len(2), .name_len = 2, .file_type = EXT2_FT_DIR };
             
             memcpy(dir_buf.buf, &dot, EXT2_DIRENT_HEADER);
             memcpy(dir_buf.buf + EXT2_DIRENT_HEADER, ".", 1);
@@ -741,6 +746,10 @@ int8_t write(struct EXT2DriverRequest *request) {
             }
             write_blocks(&file_buf, lba, 1);
         }
+    }
+    
+    if (indirect_lba != 0) {
+        write_blocks(&indirect_buf, indirect_lba, 1);
     }
     write_inode(new_inode_num, &new_inode);
 
