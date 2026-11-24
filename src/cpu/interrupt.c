@@ -2,6 +2,7 @@
 #include "header/cpu/portio.h"
 #include "header/driver/keyboard.h"
 #include "header/driver/framebuffer.h"
+#include "header/filesystem/ext2.h"
 #include "header/process/process.h"
 #include "header/process/scheduler.h"
 
@@ -45,35 +46,6 @@ void activate_keyboard_interrupt(void) {
     out(PIC1_DATA, in(PIC1_DATA) & ~(1 << IRQ_KEYBOARD));
 }
 
-// syscall puts sementara
-static void syscall_puts(const char *buf, uint32_t len, uint8_t color) {
-    static uint8_t row = 0, col = 0;
-    for (uint32_t i = 0; i < len; i++) {
-        if (buf[i] == '\n' || col >= FRAMEBUFFER_WIDTH) {
-            row = (row + 1) % FRAMEBUFFER_HEIGHT;
-            col = 0;
-            if (buf[i] == '\n') continue;
-        }
-        framebuffer_write(row, col++, buf[i], color, 0);
-    }
-    framebuffer_set_cursor(row, col);
-}
-
-void syscall(struct InterruptFrame frame) {
-    switch (frame.cpu.general.eax) {
-        case SYSCALL_PUTS:
-            syscall_puts((const char *) frame.cpu.general.ebx, frame.cpu.general.ecx, (uint8_t) frame.cpu.general.edx);
-            break;
-        case SYSCALL_EXIT: {
-            // ebx belum dipakai
-            struct ProcessControlBlock *current = process_get_current_running_pcb_pointer();
-            if (current != NULL)
-                process_destroy(current->metadata.pid);
-            scheduler_switch_to_next_process();
-        }
-    }
-}
-
 void main_interrupt_handler(struct InterruptFrame frame) {
     switch (frame.int_number) {
         case PIC1_OFFSET + IRQ_TIMER:
@@ -91,7 +63,8 @@ void main_interrupt_handler(struct InterruptFrame frame) {
             }
             break;
         case SYSCALL_INTERRUPT_VECTOR:
-            syscall(frame);
+            // frame berada di kernel stack yang akan di-pop intsetup.s, nilai balik dikirim lewat eax
+            frame.cpu.general.eax = syscall_dispatcher(&frame);
             break;
         case PIC1_OFFSET + IRQ_KEYBOARD:
             keyboard_isr();
@@ -104,5 +77,67 @@ void main_interrupt_handler(struct InterruptFrame frame) {
                 pic_ack((uint8_t)((frame.int_number - PIC2_OFFSET) + 8));
             }
             break;
+    }
+}
+
+uint32_t syscall_dispatcher(struct InterruptFrame *frame) {
+    uint32_t syscall_num = frame->cpu.general.eax;
+
+    switch (syscall_num) {
+        case 0: // Syscall 0: Read
+            return read(*(struct EXT2DriverRequest*)frame->cpu.general.ebx);
+
+        case 1: // Syscall 1: Read Directory
+            return (uint32_t)-1;
+
+        case 2: // Syscall 2: Write
+            return write((struct EXT2DriverRequest*)frame->cpu.general.ebx);
+
+        case 3: // Syscall 3: Delete
+            return (uint32_t)-1;
+
+        case 4: // Syscall 4: Keyboard Getchar
+            {
+                char c = 0;
+                get_keyboard_buffer(&c);
+                return (uint32_t)c;
+            }
+
+        case 5: // Syscall 5: Putchar (Tulis karakter ke layar)
+            framebuffer_write(frame->cpu.general.ecx, frame->cpu.general.edx, (char)frame->cpu.general.ebx, frame->cpu.index.esi, 0);
+            return 0;
+
+        case 6: // Syscall 6: Puts (Tulis string ke layar)
+            {
+                char* str = (char*)frame->cpu.general.ebx;
+                uint32_t current_col = frame->cpu.general.edx;
+                uint32_t current_row = frame->cpu.general.ecx;
+                
+                while (*str != '\0') {
+                    framebuffer_write(current_row, current_col, *str, frame->cpu.index.esi, 0);
+                    current_col++;
+                    if (current_col >= 80) {
+                        current_col = 0;
+                        current_row++;
+                    }
+                    str++;
+                }
+            }
+            return 0;
+
+        case 7: // Syscall 7: Keyboard Activate
+            keyboard_state_activate();
+            return 0;
+
+        case SYSCALL_EXIT: // Syscall 10: Exit, ebx = return code main() (belum dipakai)
+            {
+                struct ProcessControlBlock *current = process_get_current_running_pcb_pointer();
+                if (current != NULL)
+                    process_destroy(current->metadata.pid);
+                scheduler_switch_to_next_process();
+            }
+
+        default: // Syscall tidak valid
+            return (uint32_t)-1;
     }
 }

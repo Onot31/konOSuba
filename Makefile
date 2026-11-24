@@ -16,7 +16,7 @@ AFLAGS        = -f elf32 -g -F dwarf
 LFLAGS        = -T $(SOURCE_FOLDER)/linker.ld -melf_i386
 
 # Targets
-run: all disk insert-shell
+run: all $(OUTPUT_FOLDER)/$(DISK_NAME).bin insert-shell
 	@qemu-system-i386 -s -S -drive file=$(OUTPUT_FOLDER)/$(DISK_NAME).bin,format=raw,if=ide,index=0,media=disk -cdrom $(OUTPUT_FOLDER)/$(ISO_NAME).iso
 
 all: build
@@ -55,19 +55,46 @@ iso: kernel
 	@genisoimage -R -b boot/grub/grub1 -no-emul-boot -boot-load-size 4 -A os -input-charset utf8 -quiet -boot-info-table -o $(OUTPUT_FOLDER)/$(ISO_NAME).iso $(OUTPUT_FOLDER)/iso
 	@rm -rf $(OUTPUT_FOLDER)/iso/
 
+user-shell:
+	@mkdir -p $(OUTPUT_FOLDER)
+	@$(ASM) $(AFLAGS) $(SOURCE_FOLDER)/crt0.s -o crt0.o
+	@$(CC) $(CFLAGS) -fno-pie $(SOURCE_FOLDER)/user-shell.c -o user-shell.o
+	@$(CC) $(CFLAGS) -fno-pie $(SOURCE_FOLDER)/stdlib/string.c -o string.o
+	@$(LIN) -T $(SOURCE_FOLDER)/user-linker.ld -melf_i386 --oformat=binary crt0.o user-shell.o string.o -o $(OUTPUT_FOLDER)/shell
+	@echo Linking object shell object files and generate flat binary...
+	@$(LIN) -T $(SOURCE_FOLDER)/user-linker.ld -melf_i386 --oformat=elf32-i386 crt0.o user-shell.o string.o -o $(OUTPUT_FOLDER)/shell_elf
+	@echo Linking object shell object files and generate ELF32 for debugging...
+	@size --target=binary $(OUTPUT_FOLDER)/shell
+	@rm -f *.o
+
+USER_APP_NAMES = hello-world counter clock
+USER_APP_BINS  = $(addprefix $(OUTPUT_FOLDER)/,$(USER_APP_NAMES))
+
+user-apps: $(USER_APP_BINS)
+
+$(USER_APP_BINS): $(OUTPUT_FOLDER)/%: $(SOURCE_FOLDER)/user-%.c $(SOURCE_FOLDER)/crt0.s $(SOURCE_FOLDER)/user-linker.ld
+	@mkdir -p $(OUTPUT_FOLDER)
+	@$(ASM) $(AFLAGS) $(SOURCE_FOLDER)/crt0.s -o $(OUTPUT_FOLDER)/crt0-$*.o
+	@$(CC) $(CFLAGS) -fno-pie $< -o $(OUTPUT_FOLDER)/$*.o
+	@$(LIN) -T $(SOURCE_FOLDER)/user-linker.ld -melf_i386 --oformat=binary $(OUTPUT_FOLDER)/crt0-$*.o $(OUTPUT_FOLDER)/$*.o -o $@
+	@echo Linking $* object files and generate flat binary...
+	@$(LIN) -T $(SOURCE_FOLDER)/user-linker.ld -melf_i386 --oformat=elf32-i386 $(OUTPUT_FOLDER)/crt0-$*.o $(OUTPUT_FOLDER)/$*.o -o $@_elf
+	@echo Linking $* object files and generate ELF32 for debugging...
+	@rm -f $(OUTPUT_FOLDER)/crt0-$*.o $(OUTPUT_FOLDER)/$*.o
+	@size --target=binary $@
+
 disk:
 	@qemu-img create -f raw $(OUTPUT_FOLDER)/$(DISK_NAME).bin 4M
+
+# Disk dibuat hanya jika belum ada, sehingga isi file system tetap tersimpan antar run.
+# Gunakan "make disk" untuk mengosongkan disk.
+$(OUTPUT_FOLDER)/$(DISK_NAME).bin:
+	@mkdir -p $(OUTPUT_FOLDER)
+	@qemu-img create -f raw $@ 4M
 
 # Host tool untuk memasukkan file ke storage.bin
 inserter:
 	@$(CC) -Wno-builtin-declaration-mismatch -g -I$(SOURCE_FOLDER) $(SOURCE_FOLDER)/filesystem/ext2.c $(SOURCE_FOLDER)/external-inserter.c -o $(OUTPUT_FOLDER)/inserter
-# TODO (Milestone 3): ganti user-hello.c dengan source shell yang sebenarnya
-user-shell:
-	@mkdir -p $(OUTPUT_FOLDER)/user
-	@$(ASM) $(AFLAGS) $(SOURCE_FOLDER)/crt0.s -o $(OUTPUT_FOLDER)/user/crt0.o
-	@$(CC) $(CFLAGS) -fno-pie $(SOURCE_FOLDER)/user-hello.c -o $(OUTPUT_FOLDER)/user/user-hello.o
-	@$(LIN) -T $(SOURCE_FOLDER)/user-linker.ld -melf_i386 --oformat=binary $(OUTPUT_FOLDER)/user/crt0.o $(OUTPUT_FOLDER)/user/user-hello.o -o $(OUTPUT_FOLDER)/shell
-	@rm -rf $(OUTPUT_FOLDER)/user
 
-insert-shell: inserter user-shell
+insert-shell: inserter user-shell $(OUTPUT_FOLDER)/$(DISK_NAME).bin
 	@cd $(OUTPUT_FOLDER); ./inserter -f shell 1 $(DISK_NAME).bin

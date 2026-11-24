@@ -11,6 +11,9 @@ static void pde_set_frame(struct PageDirectoryEntry *entry, uint32_t frame) {
     memcpy(entry, &raw, sizeof(raw));
 }
 
+/**
+ * _paging_kernel_page_directory and _paging_kernel_page_table is initialized on kernel-entrypoint.s
+ */
 __attribute__((aligned(0x1000))) struct PageDirectory _paging_kernel_page_directory;
 
 __attribute__((aligned(0x1000))) struct PageTable _paging_kernel_page_table;
@@ -97,6 +100,17 @@ bool paging_allocate_user_page_frame(struct PageDirectory *page_dir, void *virtu
 
     // check if allocation possible
     if (!paging_allocate_check(PAGE_FRAME_SIZE)) {
+        return false;
+    }
+
+    // tolak address kernel (higher half & recursive mapping) dan address yang sudah terpetakan
+    if ((uint32_t) virtual_addr >= 0xC0000000u) {
+        return false;
+    }
+    uint32_t page_directory_index = ((uint32_t)virtual_addr >> 22) & 0x3FF;
+    uint32_t page_table_index = ((uint32_t)virtual_addr >> 12) & 0x3FF;
+    struct PageTable *page_table = paging_get_page_table(page_dir, page_directory_index);
+    if (page_table == NULL || page_table->table[page_table_index].flag.present_bit) {
         return false;
     }
 
