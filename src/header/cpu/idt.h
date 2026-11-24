@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #define IDT_ENTRY_COUNT 256
+#define ISR_STUB_TABLE_LIMIT 64
 
 /* Bit-bit tipe gate: 32-bit Interrupt Gate = 0b01110 (0xE) */
 #define INTERRUPT_GATE_R_BIT_1  0b000   // bit 37-39

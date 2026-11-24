@@ -16,7 +16,7 @@ AFLAGS        = -f elf32 -g -F dwarf
 LFLAGS        = -T $(SOURCE_FOLDER)/linker.ld -melf_i386
 
 # Targets
-run: all disk
+run: all disk insert-shell
 	@qemu-system-i386 -s -S -drive file=$(OUTPUT_FOLDER)/$(DISK_NAME).bin,format=raw,if=ide,index=0,media=disk -cdrom $(OUTPUT_FOLDER)/$(ISO_NAME).iso
 
 all: build
@@ -40,6 +40,9 @@ kernel:
 	@$(CC) $(CFLAGS) $(SOURCE_FOLDER)/driver/disk.c -o $(OUTPUT_FOLDER)/disk.o
 	@$(CC) $(CFLAGS) $(SOURCE_FOLDER)/filesystem/ext2.c -o $(OUTPUT_FOLDER)/ext2.o
 	@$(CC) $(CFLAGS) $(SOURCE_FOLDER)/memory/paging.c -o $(OUTPUT_FOLDER)/paging.o
+	@$(ASM) $(AFLAGS) $(SOURCE_FOLDER)/process/context-switch.s -o $(OUTPUT_FOLDER)/context-switch.o
+	@$(CC) $(CFLAGS) $(SOURCE_FOLDER)/process/process.c -o $(OUTPUT_FOLDER)/process.o
+	@$(CC) $(CFLAGS) $(SOURCE_FOLDER)/process/scheduler.c -o $(OUTPUT_FOLDER)/scheduler.o
 	@$(LIN) $(LFLAGS) $(OUTPUT_FOLDER)/*.o -o $(OUTPUT_FOLDER)/kernel
 	@echo Linking object files and generate elf32...
 	@rm -f $(OUTPUT_FOLDER)/*.o
@@ -54,3 +57,17 @@ iso: kernel
 
 disk:
 	@qemu-img create -f raw $(OUTPUT_FOLDER)/$(DISK_NAME).bin 4M
+
+# Host tool untuk memasukkan file ke storage.bin
+inserter:
+	@$(CC) -Wno-builtin-declaration-mismatch -g -I$(SOURCE_FOLDER) $(SOURCE_FOLDER)/filesystem/ext2.c $(SOURCE_FOLDER)/external-inserter.c -o $(OUTPUT_FOLDER)/inserter
+# TODO (Milestone 3): ganti user-hello.c dengan source shell yang sebenarnya
+user-shell:
+	@mkdir -p $(OUTPUT_FOLDER)/user
+	@$(ASM) $(AFLAGS) $(SOURCE_FOLDER)/crt0.s -o $(OUTPUT_FOLDER)/user/crt0.o
+	@$(CC) $(CFLAGS) -fno-pie $(SOURCE_FOLDER)/user-hello.c -o $(OUTPUT_FOLDER)/user/user-hello.o
+	@$(LIN) -T $(SOURCE_FOLDER)/user-linker.ld -melf_i386 --oformat=binary $(OUTPUT_FOLDER)/user/crt0.o $(OUTPUT_FOLDER)/user/user-hello.o -o $(OUTPUT_FOLDER)/shell
+	@rm -rf $(OUTPUT_FOLDER)/user
+
+insert-shell: inserter user-shell
+	@cd $(OUTPUT_FOLDER); ./inserter -f shell 1 $(DISK_NAME).bin

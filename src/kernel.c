@@ -7,35 +7,31 @@
 #include "header/driver/keyboard.h"
 #include "header/kernel-entrypoint.h"
 #include "header/filesystem/ext2.h"
+#include "header/process/process.h"
+#include "header/process/scheduler.h"
 
 void kernel_setup(void) {
-    // Chapter 0
     load_gdt(&_gdt_gdtr);
-    
-    // Chapter 1: Interrupt
     pic_remap();
     initialize_idt();
-    initialize_filesystem_ext2();
     activate_keyboard_interrupt();
-    
-    // Chapter 1: Framebuffer
     framebuffer_clear();
     framebuffer_set_cursor(0, 0);
-    
-    // disk image & driver test
+    initialize_filesystem_ext2();
+    gdt_install_tss();
+    set_tss_register();
 
-    // Chapter 1: Keyboard Loop
-    //int row = 0, col = 0;
-    keyboard_state_activate();
-    
-    struct EXT2DriverRequest req = {
-            .buf          = "haihai",
-            .name         = "tes123",
-            .name_len     = 2,
-            .parent_inode = 1,
-            .buffer_size  = 100,                  
-            .is_directory = false
-        };
+    // Shell request
+    struct EXT2DriverRequest request = {
+        .buf          = (uint8_t*) 0,
+        .name         = "shell",
+        .parent_inode = 1,
+        .buffer_size  = 0x100000,
+        .name_len     = 5,
+    };
 
-    write(&req);
+    set_tss_kernel_current_stack();
+    process_create_user_process(request);
+    scheduler_init();
+    scheduler_switch_to_next_process();
 }

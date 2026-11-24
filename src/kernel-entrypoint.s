@@ -1,32 +1,28 @@
-global loader                        ; the entry symbol for ELF
-global load_gdt                      ; load GDT table
-global set_tss_register              ; set tss register to GDT entry
-extern kernel_setup                  ; kernel C entrypoint
-extern _paging_kernel_page_directory ; kernel page directory
-extern _paging_kernel_page_table     ; kernel page table
+global loader
+global load_gdt
+global set_tss_register
+extern kernel_setup
+extern _paging_kernel_page_directory
+extern _paging_kernel_page_table
 global kernel_execute_user_program
 
-KERNEL_VIRTUAL_BASE equ 0xC0000000    ; kernel virtual memory
-KERNEL_STACK_SIZE   equ 2097152       ; size of stack in bytes
-MAGIC_NUMBER        equ 0x1BADB002    ; define the magic number constant
-FLAGS               equ 0x0           ; multiboot flags
-CHECKSUM            equ -MAGIC_NUMBER ; calculate the checksum (magic number + checksum + flags == 0)
-
+KERNEL_VIRTUAL_BASE equ 0xC0000000
+KERNEL_STACK_SIZE   equ 2097152
+MAGIC_NUMBER        equ 0x1BADB002
+FLAGS               equ 0x0
+CHECKSUM            equ -MAGIC_NUMBER
 
 section .bss
-align 4                    ; align at 4 bytes
-kernel_stack:              ; label points to beginning of memory
-    resb KERNEL_STACK_SIZE ; reserve stack for the kernel
+align 4
+kernel_stack:
+    resb KERNEL_STACK_SIZE
 
+section .multiboot
+align 4
+    dd MAGIC_NUMBER
+    dd FLAGS
+    dd CHECKSUM
 
-section .multiboot  ; GRUB multiboot header
-align 4             ; the code must be 4 byte aligned
-    dd MAGIC_NUMBER ; write the magic number to the machine code,
-    dd FLAGS        ; the flags,
-    dd CHECKSUM     ; and the checksum
-
-
-; start of the text (code) section
 section .setup.text 
 loader equ (loader_entrypoint - KERNEL_VIRTUAL_BASE)
 loader_entrypoint:         ; the loader label (defined as entry point in linker script)
@@ -112,8 +108,7 @@ kernel_execute_user_program:
     mov gs, ax
     mov ecx, [esp + 4]
     push eax
-    mov eax, ecx
-    add eax, 0x400000 - 4
+    mov eax, 0xC0000000 - 4          ; user stack top, sama dengan PROCESS_USER_STACK_TOP (process.h)
     push eax
     pushfd
     mov eax, 0x18 | 0x3

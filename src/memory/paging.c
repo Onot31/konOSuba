@@ -4,16 +4,17 @@
 #include "header/stdlib/string.h"
 #include "header/memory/paging.h"
 
-/**
- * _paging_kernel_page_directory and _paging_kernel_page_table is initialized on kernel-entrypoint.s
- */
+static void pde_set_frame(struct PageDirectoryEntry *entry, uint32_t frame) {
+    uint32_t raw;
+    memcpy(&raw, entry, sizeof(raw));
+    raw = (raw & 0xFFFu) | (frame << 12);
+    memcpy(entry, &raw, sizeof(raw));
+}
+
 __attribute__((aligned(0x1000))) struct PageDirectory _paging_kernel_page_directory;
 
 __attribute__((aligned(0x1000))) struct PageTable _paging_kernel_page_table;
 
-/**
- * Global page frame manager state tracking free/busy frames.
- */
 struct PageManagerState page_manager_state = {
     .page_frame_map = {
         [0 ... KERNEL_RESERVED_PAGE_FRAME_COUNT - 1] = true,
@@ -43,7 +44,7 @@ struct PageTable *paging_get_page_table(struct PageDirectory *page_dir, uint32_t
                 .write_bit = true,
                 .user_bit = true,
             };
-            dir_entry->page_attr_table = page_frame_number;
+            pde_set_frame(dir_entry, page_frame_number);
             struct PageTable *page_table = (struct PageTable *)(RECURSIVE_PAGE_TABLES_VIRTUAL_ADDRESS + page_directory_index * PAGE_FRAME_SIZE);
             flush_single_tlb(page_table);
             memset(page_table, 0, PAGE_FRAME_SIZE);
@@ -72,10 +73,6 @@ void flush_single_tlb(void *virtual_addr) {
     asm volatile("invlpg (%0)" : /* <Empty> */ : "b"(virtual_addr): "memory");
 }
 
-
-
-/* --- Memory Management --- */
-// TODO: Implement
 bool paging_allocate_check(uint32_t amount) {
     uint32_t required_frames = amount / PAGE_FRAME_SIZE + (amount % PAGE_FRAME_SIZE > 0);
 
@@ -122,9 +119,9 @@ bool paging_allocate_user_page_frame(struct PageDirectory *page_dir, void *virtu
         .write_bit = true,
         .user_bit = true
     };
-    void *physical_addr = (uint32_t *) 0x400000 + map_index * PAGE_FRAME_SIZE;
+    void *physical_addr = (void *) (map_index * PAGE_FRAME_SIZE);
 
-    update_page_directory_entry(page_dir, &physical_addr, virtual_addr, flag);
+    update_page_directory_entry(page_dir, physical_addr, virtual_addr, flag);
     
     return true;
 }
@@ -148,7 +145,7 @@ bool paging_free_user_page_frame(struct PageDirectory *page_dir, void *virtual_a
     uint32_t physical_address = page_table->table[page_table_index].page_address << 12;
     if (physical_address < 0x400000) return false;
 
-    uint32_t map_index = ((physical_address - 0x400000) / PAGE_FRAME_SIZE);
+    uint32_t map_index = physical_address / PAGE_FRAME_SIZE;
     if (map_index >= PAGE_FRAME_MAX_COUNT) return false;
 
     // remove frame 
@@ -161,4 +158,62 @@ bool paging_free_user_page_frame(struct PageDirectory *page_dir, void *virtual_a
     flush_single_tlb(virtual_addr);
 
     return true;
+}
+
+
+/* --- Process-related Memory Management --- */
+// TODO (Bagian A): stub minimal agar process bisa dites, silakan diganti/dilengkapi.
+__attribute__((aligned(0x1000))) static struct PageDirectory page_directory_list[PAGING_DIRECTORY_TABLE_MAX_COUNT] = {0};
+
+static struct {
+    bool page_directory_used[PAGING_DIRECTORY_TABLE_MAX_COUNT];
+} page_directory_manager = {
+    .page_directory_used = {false},
+};
+
+struct PageDirectory* paging_create_new_page_directory(void) {
+    for (uint32_t i = 0; i < PAGING_DIRECTORY_TABLE_MAX_COUNT; i++) {
+        if (page_directory_manager.page_directory_used[i]) continue;
+        page_directory_manager.page_directory_used[i] = true;
+
+        struct PageDirectory *page_dir = &page_directory_list[i];
+        memset(page_dir, 0, sizeof(struct PageDirectory));
+
+        // Kernel higher half (0xC0000000 - 0xC03FFFFF): pakai page table kernel yang sama
+        page_dir->table[0x300] = _paging_kernel_page_directory.table[0x300];
+
+        // Recursive mapping agar paging_get_page_table() bekerja saat page directory ini aktif
+        struct PageDirectoryEntry *recursive_entry = &page_dir->table[RECURSIVE_PAGE_DIRECTORY_INDEX];
+        recursive_entry->flag.present_bit = true;
+        recursive_entry->flag.write_bit   = true;
+        pde_set_frame(recursive_entry, ((uint32_t) page_dir - 0xC0000000) >> 12);
+        return page_dir;
+    }
+    return NULL;
+}
+
+bool paging_free_page_directory(struct PageDirectory *page_dir) {
+    for (uint32_t i = 0; i < PAGING_DIRECTORY_TABLE_MAX_COUNT; i++) {
+        if (&page_directory_list[i] == page_dir) {
+            page_directory_manager.page_directory_used[i] = false;
+            memset(page_dir, 0, sizeof(struct PageDirectory));
+            return true;
+        }
+    }
+    return false;
+}
+
+struct PageDirectory* paging_get_current_page_directory_addr(void) {
+    uint32_t current_page_directory_phys_addr;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(current_page_directory_phys_addr): /* <Empty> */);
+    uint32_t virtual_addr_page_dir = current_page_directory_phys_addr + 0xC0000000;
+    return (struct PageDirectory*) virtual_addr_page_dir;
+}
+
+void paging_use_page_directory(struct PageDirectory *page_dir_virtual_addr) {
+    uint32_t physical_addr_page_dir = (uint32_t) page_dir_virtual_addr;
+    // Additional layer of check & mistake safety net
+    if ((uint32_t) page_dir_virtual_addr > 0xC0000000)
+        physical_addr_page_dir -= 0xC0000000;
+    __asm__  volatile("mov %0, %%cr3" : /* <Empty> */ : "r"(physical_addr_page_dir): "memory");
 }
