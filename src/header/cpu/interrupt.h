@@ -24,6 +24,10 @@
 #define IRQ_TIMER       0
 #define IRQ_KEYBOARD    1
 
+/* Syscall: int 0x30, nomor service di eax */
+#define SYSCALL_INTERRUPT_VECTOR 0x30
+#define SYSCALL_EXIT 10
+
 /* Keyboard Data Port */
 #define KEYBOARD_DATA_PORT 0x60
 
@@ -67,5 +71,8 @@ void activate_keyboard_interrupt(void);
 
 /* Main ISR */
 void main_interrupt_handler(struct InterruptFrame frame);
+
+/* Syscall handler, dipanggil dari main_interrupt_handler. Nilai balik dikirim ke user lewat eax */
+uint32_t syscall_dispatcher(struct InterruptFrame *frame);
 
 #endif

@@ -367,8 +367,7 @@ int8_t read(struct EXT2DriverRequest request) {
 
     if (request.buffer_size < file.i_size)
         return 2;
-    if (file.i_size > 0 && request.buf == NULL)
-        return -1;
+    // buf == NULL valid: executable user process di-load ke virtual address 0x0
 
     uint8_t *dest      = (uint8_t *) request.buf;
     uint32_t remaining = file.i_size;

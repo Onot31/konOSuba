@@ -9,7 +9,7 @@
 
 | Nama | NIM | Bagian utama |
 |------|-----|--------------|
-| NAMA_1 | 135xxxxx | ... |
+| NAMA_1 | 13525024 | ... |
 | NAMA_2 | 135xxxxx | ... |
 | NAMA_3 | 135xxxxx | ... |
 | NAMA_4 | 135xxxxx | ... |

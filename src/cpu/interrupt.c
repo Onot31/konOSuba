@@ -1,8 +1,10 @@
 #include "header/cpu/interrupt.h"
 #include "header/cpu/portio.h"
 #include "header/driver/keyboard.h"
-#include "header/filesystem/ext2.h"
 #include "header/driver/framebuffer.h"
+#include "header/filesystem/ext2.h"
+#include "header/process/process.h"
+#include "header/process/scheduler.h"
 
 struct TSSEntry _interrupt_tss_entry = {
     .ss0 = 0x10,
@@ -46,6 +48,24 @@ void activate_keyboard_interrupt(void) {
 
 void main_interrupt_handler(struct InterruptFrame frame) {
     switch (frame.int_number) {
+        case PIC1_OFFSET + IRQ_TIMER:
+            pic_ack(IRQ_TIMER);
+            // Context switch jika yang terinterupsi user process (ring 3)
+            if ((frame.cs & 0x3) == 0x3) {
+                struct Context ctx = {
+                    .cpu                         = frame.cpu,
+                    .eip                         = frame.eip,
+                    .eflags                      = frame.eflags,
+                    .page_directory_virtual_addr = paging_get_current_page_directory_addr(),
+                };
+                scheduler_save_context_to_current_running_pcb(ctx);
+                scheduler_switch_to_next_process();
+            }
+            break;
+        case SYSCALL_INTERRUPT_VECTOR:
+            // frame berada di kernel stack yang akan di-pop intsetup.s, nilai balik dikirim lewat eax
+            frame.cpu.general.eax = syscall_dispatcher(&frame);
+            break;
         case PIC1_OFFSET + IRQ_KEYBOARD:
             keyboard_isr();
             pic_ack(IRQ_KEYBOARD);
@@ -108,6 +128,14 @@ uint32_t syscall_dispatcher(struct InterruptFrame *frame) {
         case 7: // Syscall 7: Keyboard Activate
             keyboard_state_activate();
             return 0;
+
+        case SYSCALL_EXIT: // Syscall 10: Exit, ebx = return code main() (belum dipakai)
+            {
+                struct ProcessControlBlock *current = process_get_current_running_pcb_pointer();
+                if (current != NULL)
+                    process_destroy(current->metadata.pid);
+                scheduler_switch_to_next_process();
+            }
 
         default: // Syscall tidak valid
             return (uint32_t)-1;
