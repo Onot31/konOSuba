@@ -17,10 +17,10 @@ LFLAGS        = -T $(SOURCE_FOLDER)/linker.ld -melf_i386
 
 # Targets
 run: all $(OUTPUT_FOLDER)/$(DISK_NAME).bin insert-shell insert-apps
-	@qemu-system-i386 -drive file=$(OUTPUT_FOLDER)/$(DISK_NAME).bin,format=raw,if=ide,index=0,media=disk -cdrom $(OUTPUT_FOLDER)/$(ISO_NAME).iso
+	@qemu-system-i386 -display gtk,zoom-to-fit=on -drive file=$(OUTPUT_FOLDER)/$(DISK_NAME).bin,format=raw,if=ide,index=0,media=disk -cdrom $(OUTPUT_FOLDER)/$(ISO_NAME).iso
 
 run-debug: all $(OUTPUT_FOLDER)/$(DISK_NAME).bin insert-shell insert-apps
-	@qemu-system-i386 -s -S -drive file=$(OUTPUT_FOLDER)/$(DISK_NAME).bin,format=raw,if=ide,index=0,media=disk -cdrom $(OUTPUT_FOLDER)/$(ISO_NAME).iso
+	@qemu-system-i386 -display gtk,zoom-to-fit=on -s -S -drive file=$(OUTPUT_FOLDER)/$(DISK_NAME).bin,format=raw,if=ide,index=0,media=disk -cdrom $(OUTPUT_FOLDER)/$(ISO_NAME).iso
 
 all: build
 build: iso
@@ -101,9 +101,11 @@ inserter:
 	@$(CC) -Wno-builtin-declaration-mismatch -g -I$(SOURCE_FOLDER) $(SOURCE_FOLDER)/filesystem/ext2.c $(SOURCE_FOLDER)/external-inserter.c -o $(OUTPUT_FOLDER)/inserter
 
 insert-shell: inserter user-shell $(OUTPUT_FOLDER)/$(DISK_NAME).bin
-	@cd $(OUTPUT_FOLDER); ./inserter -f shell 1 $(DISK_NAME).bin
+	@cd $(OUTPUT_FOLDER); bin_inode=$$(./inserter -d .bin 1 $(DISK_NAME).bin | sed -n 's/^Inode: //p'); \
+	./inserter -f shell $$bin_inode $(DISK_NAME).bin
 
 insert-apps: inserter user-apps $(OUTPUT_FOLDER)/$(DISK_NAME).bin
-	@cd $(OUTPUT_FOLDER); ./inserter -f hello-world 1 $(DISK_NAME).bin
-	@cd $(OUTPUT_FOLDER); ./inserter -f counter 1 $(DISK_NAME).bin
-	@cd $(OUTPUT_FOLDER); ./inserter -f clock 1 $(DISK_NAME).bin
+	@cd $(OUTPUT_FOLDER); bin_inode=$$(./inserter -d .bin 1 $(DISK_NAME).bin | sed -n 's/^Inode: //p'); \
+	./inserter -f hello-world $$bin_inode $(DISK_NAME).bin; \
+	./inserter -f counter $$bin_inode $(DISK_NAME).bin; \
+	./inserter -f clock $$bin_inode $(DISK_NAME).bin

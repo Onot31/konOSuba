@@ -22,9 +22,9 @@ static void framebuffer_scroll(void) {
     memmove(
         FRAMEBUFFER_MEMORY_OFFSET,
         FRAMEBUFFER_MEMORY_OFFSET + FRAMEBUFFER_WIDTH * 2,
-        (FRAMEBUFFER_HEIGHT - 1) * FRAMEBUFFER_WIDTH * 2
+        (FRAMEBUFFER_TEXT_HEIGHT - 1) * FRAMEBUFFER_WIDTH * 2
     );
-    framebuffer_clear_row(FRAMEBUFFER_HEIGHT - 1);
+    framebuffer_clear_row(FRAMEBUFFER_TEXT_HEIGHT - 1);
 }
 
 void framebuffer_write(uint8_t row, uint8_t col, char c, uint8_t fg, uint8_t bg) {
@@ -62,7 +62,7 @@ void framebuffer_putchar(char c, uint8_t fg, uint8_t bg) {
             break;
     }
 
-    while (cursor_row >= FRAMEBUFFER_HEIGHT) {
+    while (cursor_row >= FRAMEBUFFER_TEXT_HEIGHT) {
         framebuffer_scroll();
         cursor_row--;
     }
@@ -75,6 +75,14 @@ void framebuffer_puts(const char *s, uint32_t len, uint8_t fg, uint8_t bg) {
 
     for (uint32_t i = 0; i < len; i++)
         framebuffer_putchar(s[i], fg, bg);
+}
+
+void framebuffer_puts_at(uint8_t row, uint8_t col, const char *s, uint32_t len, uint8_t fg, uint8_t bg) {
+    if (s == NULL || row >= FRAMEBUFFER_HEIGHT)
+        return;
+
+    for (uint32_t i = 0; i < len && (uint32_t)col + i < FRAMEBUFFER_WIDTH; i++)
+        framebuffer_write(row, (uint8_t)(col + i), s[i], fg, bg);
 }
 
 void framebuffer_set_cursor(uint8_t r, uint8_t c) {

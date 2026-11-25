@@ -36,6 +36,16 @@
 #define SYSCALL_GET_TIME            14  /* ebx=struct TimeInfo*; balik 0 sukses, <0 gagal */
 #define SYSCALL_MOVE_CURSOR         15  /* ebx=row, ecx=col; balik 0 sukses */
 #define SYSCALL_GET_CURSOR          16  /* ebx=uint8_t* row, ecx=uint8_t* col; balik 0 sukses */
+#define SYSCALL_PUTS_AT             18  /* ebx=struct PutAtRequest*; tulis tanpa memindah cursor */
+
+struct PutAtRequest {
+    uint8_t row;
+    uint8_t col;
+    uint8_t color;
+    uint8_t _pad;
+    const char *text;
+    uint32_t len;
+};
 
 #define PROCESS_INFO_NAME_LEN       32
 #define PROCESS_INFO_MAX            16

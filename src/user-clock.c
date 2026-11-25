@@ -5,7 +5,6 @@
  */
 
 #include <stdint.h>
-#include <stdbool.h>
 #include "header/syscall.h"
 
 #define CLOCK_ROW 24
@@ -22,48 +21,42 @@ static int32_t syscall3(uint32_t number, uint32_t a1, uint32_t a2, uint32_t a3) 
     return result;
 }
 
-static void put_text(const char *text, uint32_t len) {
-    syscall3(SYSCALL_PUTS, (uint32_t)text, len, 0x0A);
-}
-
-static void put_char(char c) {
-    syscall3(SYSCALL_PUTCHAR, (uint32_t)(unsigned char)c, 0x0A, 0);
-}
-
-static void put_two(uint8_t value) {
-    put_char((char)('0' + (value / 10u)));
-    put_char((char)('0' + (value % 10u)));
+static void put_two(char *out, uint8_t value) {
+    out[0] = (char)('0' + (value / 10u));
+    out[1] = (char)('0' + (value % 10u));
 }
 
 int main(void) {
     static const char unavailable[] = "clock: syscall waktu belum tersedia\n";
-    uint8_t saved_row = 0;
-    uint8_t saved_col = 0;
     uint8_t last_second = 0xFF;
-    bool restore_cursor;
-
-    restore_cursor = syscall3(SYSCALL_GET_CURSOR, (uint32_t)&saved_row,
-                              (uint32_t)&saved_col, 0) == 0;
 
     for (;;) {
         struct TimeInfo now;
 
         if (syscall3(SYSCALL_GET_TIME, (uint32_t)&now, 0, 0) < 0) {
-            put_text(unavailable, (uint32_t)(sizeof(unavailable) - 1));
+            syscall3(SYSCALL_PUTS, (uint32_t)unavailable,
+                     (uint32_t)(sizeof(unavailable) - 1), 0x0C);
             return 1;
         }
 
         if (now.second != last_second) {
-            last_second = now.second;
+            char line[8];
+            struct PutAtRequest request;
 
-            syscall3(SYSCALL_MOVE_CURSOR, CLOCK_ROW, CLOCK_COL, 0);
-            put_two(now.hour);
-            put_char(':');
-            put_two(now.minute);
-            put_char(':');
-            put_two(now.second);
-            if (restore_cursor)
-                syscall3(SYSCALL_MOVE_CURSOR, saved_row, saved_col, 0);
+            last_second = now.second;
+            put_two(line, now.hour);
+            line[2] = ':';
+            put_two(line + 3, now.minute);
+            line[5] = ':';
+            put_two(line + 6, now.second);
+
+            request.row = CLOCK_ROW;
+            request.col = CLOCK_COL;
+            request.color = 0x0A;
+            request._pad = 0;
+            request.text = line;
+            request.len = sizeof(line);
+            syscall3(SYSCALL_PUTS_AT, (uint32_t)&request, 0, 0);
         }
 
         __asm__ volatile("pause");

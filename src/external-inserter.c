@@ -33,14 +33,21 @@ void write_blocks(const void *ptr, uint32_t logical_block_address, uint8_t block
 
 int main(int argc, char *argv[]) {
     int argi = 1;
+    bool is_dir = false;
     if (argc >= 2 && strcmp(argv[1], "-f") == 0) {
         is_replace = true;
+        argi++;
+    }
+    if (argc > argi && strcmp(argv[argi], "-d") == 0) {
+        is_dir = true;
         argi++;
     }
 
     if (argc - argi < 3) {
         fprintf(stderr, "Usage: inserter [-f] <file> <parent_inode> <storage.bin>\n");
+        fprintf(stderr, "       inserter -d <dir> <parent_inode> <storage.bin>\n");
         fprintf(stderr, "  -f : replace if the entry already exists\n");
+        fprintf(stderr, "  -d : create a directory and print its inode\n");
         exit(1);
     }
 
@@ -67,14 +74,18 @@ int main(int argc, char *argv[]) {
         fclose(fptr);
         exit(1);
     }
-    FILE *fptr_target = fopen(target_path, "rb");
-    if (fptr_target == NULL) {
-        fprintf(stderr, "inserter: cannot open input file '%s'\n", target_path);
-        fclose(fptr);
-        exit(1);
+    FILE *fptr_target = NULL;
+    size_t filesize = 0;
+    if (!is_dir) {
+        fptr_target = fopen(target_path, "rb");
+        if (fptr_target == NULL) {
+            fprintf(stderr, "inserter: cannot open input file '%s'\n", target_path);
+            fclose(fptr);
+            exit(1);
+        }
+        filesize = fread(file_buffer, 1, 4*1024*1024, fptr_target);
+        fclose(fptr_target);
     }
-    size_t filesize = fread(file_buffer, 1, 4*1024*1024, fptr_target);
-    fclose(fptr_target);
 
     const char *name = strrchr(target_path, '/');
     name = (name == NULL) ? target_path : name + 1;
@@ -91,40 +102,56 @@ int main(int argc, char *argv[]) {
     initialize_filesystem_ext2();
     struct EXT2DriverRequest request;
     struct EXT2DriverRequest reqread;
-    printf("Filename       : %s\n", name);
-    printf("Filename length: %zu\n", filename_length);
+    int retcode;
 
-    request.buf = file_buffer;
-    request.buffer_size = filesize;
     request.name = (char *) name;
     request.name_len = (uint8_t) filename_length;
-    request.is_directory = false;
+    request.is_directory = is_dir;
     sscanf(parent_str, "%u", &request.parent_inode);
 
-    reqread = request;
-    reqread.buf = read_buffer;
-    int retcode = read(reqread);
-    if (retcode == 0) {
-        bool same = true;
-        for (uint32_t i = 0; i < filesize; i++)
-        {
-            if (read_buffer[i] != file_buffer[i]){
-                printf("not same\n");
-                same = false;
-                break;
+    if (is_dir) {
+        request.buf = NULL;
+        request.buffer_size = 0;
+    } else {
+        request.buf = file_buffer;
+        request.buffer_size = filesize;
+        printf("Filename       : %s\n", name);
+        printf("Filename length: %zu\n", filename_length);
+
+        reqread = request;
+        reqread.buf = read_buffer;
+        retcode = read(reqread);
+        if (retcode == 0) {
+            bool same = true;
+            for (uint32_t i = 0; i < filesize; i++)
+            {
+                if (read_buffer[i] != file_buffer[i]){
+                    printf("not same\n");
+                    same = false;
+                    break;
+                }
             }
-        }
-        if (same) {
-            printf("same\n");
+            if (same) {
+                printf("same\n");
+            }
         }
     }
 
     retcode = write(&request);
-    if (retcode == 1 && is_replace) {
+    if (retcode == 1 && is_replace && !is_dir) {
         retcode = delete (request);
         retcode = write(&request);
     }
-    if (retcode == 0)
+
+    if (is_dir) {
+        uint32_t dir_inode = 0;
+        uint8_t dir_type = 0;
+        if (find_directory_entry(request.parent_inode, request.name, request.name_len,
+                                 &dir_inode, &dir_type))
+            printf("Inode: %u\n", dir_inode);
+        else
+            fprintf(stderr, "inserter: failed to create directory '%s'\n", name);
+    } else if (retcode == 0)
         puts("Write success");
     else if (retcode == 1)
         puts("Error: File/folder name already exist");

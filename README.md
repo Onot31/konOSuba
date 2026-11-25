@@ -32,7 +32,7 @@
 | File system | EXT2 edisi IF2130 pada disk 4 MiB |
 | Antarmuka | Shell user mode: REPL, pipeline, perintah bawaan, dan aplikasi eksternal |
 | Emulator | QEMU (`qemu-system-i386`) |
-| Status | Bab 1-4 terintegrasi: user mode, syscall 0-7 dan 10-16, scheduler, aplikasi eksternal, serta PATH persisten |
+| Status | Bab 1-4 terintegrasi: user mode, syscall 0-7 dan 10-18, scheduler, aplikasi eksternal di `/.bin`, serta PATH persisten |
 
 ## Fitur
 
@@ -61,11 +61,14 @@ Fitur bertanda `[x]` sudah berjalan pada build saat ini, sedangkan `[ ]` masih d
 
 **Program user dan shell**
 
-- [x] User mode dan system call 0-7 serta 10-16 melalui `int $0x30`, dengan validasi pointer user.
+- [x] User mode dan system call 0-7 serta 10-18 melalui `int $0x30`, dengan validasi pointer user.
 - [x] Shell dan aplikasi user: `hello-world`, `counter`, dan `clock` berjalan sebagai proses terpisah.
 - [x] Process, scheduler round-robin, context switch, `exec`, `ps`, `kill`, dan `exit`.
 - [x] RTC CMOS (`get_time`) serta pengaturan dan pembacaan cursor teks.
 - [x] PATH persisten dengan `export PATH=`, `export PATH+=`, dan `export PATH-=`.
+- [x] Aplikasi eksternal disimpan di direktori tersembunyi `/.bin`, sehingga root kosong pada boot pertama.
+- [x] Clock menulis langsung ke baris 24 lewat syscall `puts_at` (18) tanpa memindahkan cursor,
+  sehingga teks shell bergulir hanya di baris 0-23 dan input tidak tergeser.
 
 ## Cara Run
 
@@ -95,17 +98,22 @@ make run-debug   # sama seperti run, tetapi QEMU menunggu debugger (-s -S)
 | `make run-debug` | Seperti `make run`, tetapi QEMU dengan gdb server aktif |
 | `make user-shell` | `bin/shell` (flat binary) dan `bin/shell_elf` (ELF32 untuk gdb) |
 | `make user-apps` | `bin/hello-world`, `bin/counter`, `bin/clock` beserta versi `*_elf` |
-| `make insert-shell` | Memasukkan `bin/shell` ke root storage |
-| `make insert-apps` | Memasukkan ketiga aplikasi eksternal ke root storage |
+| `make insert-shell` | Memasukkan `bin/shell` ke `/.bin` |
+| `make insert-apps` | Memasukkan ketiga aplikasi eksternal ke `/.bin` |
 | `make disk` | Menimpa `bin/storage.bin` dengan disk kosong 4 MiB |
 | `make clean` | Menghapus kernel, ISO, dan object file (disk tidak ikut terhapus) |
 
 Disk image `bin/storage.bin` (4 MiB) dibuat otomatis saat `make run` jika belum ada dan **tidak** dibuat
-ulang pada run berikutnya, sehingga isi file system tetap tersimpan antar sesi.
+ulang pada run berikutnya, sehingga isi file system tetap tersimpan antar sesi. Untuk kembali ke
+kondisi awal, jalankan `make disk` lalu `make insert-shell insert-apps`.
 
 Binary program user dihasilkan di `bin/`, lalu target `insert-shell` dan `insert-apps` memasukkannya
-ke `storage.bin` melalui `bin/inserter` dengan parent inode root (`1`). Target `make run` selalu
-menjalankan kedua target insert tersebut, sedangkan Isi file system lain tetap tersimpan.
+ke `storage.bin` melalui `bin/inserter`. Inserter membuat direktori `/.bin` (`-d`) di root lebih dulu,
+lalu menulis shell dan aplikasi dengan parent inode direktori tersebut. Root sengaja dibiarkan kosong,
+sehingga `ls` pada boot pertama tidak menampilkan apa pun.
+
+QEMU dijalankan dengan `-display gtk,zoom-to-fit=on`: isi layar ikut membesar saat jendela
+di-resize, bukan mengambang di tengah dengan latar hitam.
 
 **Catatan WSL**
 
@@ -115,8 +123,9 @@ menjalankan kedua target insert tersebut, sedangkan Isi file system lain tetap t
 
 ## Daftar Perintah Shell
 
-Shell berjalan di ring 3 dan menampilkan prompt `<cwd> $`. Satu baris adalah satu pipeline; argumen
-dipisahkan spasi atau tab (tanpa tanda kutip), maksimal 16 argumen per perintah dan 8 tahap pipeline.
+Shell berjalan di ring 3 dan menampilkan prompt `konOSuba:<cwd>$`; label `konOSuba:` berwarna hijau
+dan path berwarna biru. Satu baris adalah satu pipeline; argumen dipisahkan spasi atau tab
+(tanpa tanda kutip), maksimal 16 argumen per perintah dan 8 tahap pipeline.
 
 ### Perintah bawaan
 
@@ -156,9 +165,11 @@ find clock | grep clock
 
 ### PATH dan aplikasi eksternal
 
-- PATH default `/` dan menyimpan maksimal 8 direktori.
-- Disimpan sebagai file `/path` di root, lalu dimuat kembali setiap shell dijalankan.
+- PATH default `/.bin` dan menyimpan maksimal 8 direktori.
+- Disimpan sebagai file `/.bin/.path`, lalu dimuat kembali setiap shell dijalankan.
 - Perintah tanpa `/` dicari berurutan pada direktori PATH, lalu pada direktori aktif.
+- `ls` menyembunyikan entri yang diawali titik, sehingga `/.bin` tidak tampil di `ls /`
+  dan `.path` tidak tampil di `ls .bin`.
 
 | Aplikasi | Perilaku |
 |----------|----------|
@@ -166,29 +177,39 @@ find clock | grep clock
 | `counter` | Mencetak `counter: <n>` satu baris per detik; hentikan dengan `kill <PID>`. |
 | `clock` | Menampilkan `HH:MM:SS` di kanan bawah layar (baris 24, kolom 68) dan memperbarui setiap detik. |
 
-Aplikasi dapat dijalankan dengan `exec <nama>` atau langsung `<nama>`.
+Aplikasi dapat dijalankan dengan `exec <nama>`, `exec .bin/<nama>`, atau langsung `<nama>`.
 
 ### Contoh sesi
 
 ```text
-/ $ ls
+konOSuba:/$ ls
+konOSuba:/$ ls .bin
+shell
 hello-world
 counter
 clock
-/ $ mkdir docs
-/ $ cp hello-world docs/hello
-/ $ cd docs
-/docs $ find hello
-/docs/hello
-/docs $ hello
-exec: proses hello dijalankan
-/docs $ ps
+konOSuba:/$ hello-world
+exec: proses hello-world dijalankan
+Hello World!
+konOSuba:/$ clock
+exec: proses clock dijalankan
+konOSuba:/$ ps
+PID  NAMA                STATE
+0    shell               RUNNING
+1    clock               READY
+konOSuba:/$ kill 1
+kill: PID 1 dihentikan
 ```
 
 ### Batasan
 
-Belum tersedia quoting, redirection (`>`, `<`), wildcard, opsi `-`, riwayat perintah, dan tab
-completion. Input hanya menerima karakter ASCII yang dapat dicetak dan backspace.
+Belum tersedia quoting, redirection (`>`, `<`), wildcard, opsi `-`, riwayat perintah, tab completion,
+`clear`, `echo`, `pwd`, `exit`, dan `Ctrl+C`. Input hanya menerima karakter ASCII yang dapat dicetak
+dan backspace.
+
+Semua proses berbagi satu layar dan satu cursor, tanpa kepemilikan terminal. Aplikasi yang mencetak
+terus-menerus seperti `counter` akan menyelip di antara input shell; `clock` aman karena menulis di
+baris tetap tanpa memindahkan cursor. Entri berawalan titik disembunyikan dari `ls`.
 
 ## Debug
 
@@ -289,16 +310,18 @@ memakai inter-privilege interrupt `int $0x30` dengan `eax` sebagai nomor layanan
 | 14 | `get_time` | `ebx` buffer `TimeInfo` |
 | 15 | `move_cursor` | `ebx` row, `ecx` col |
 | 16 | `get_cursor` | `ebx` pointer row, `ecx` pointer col |
+| 18 | `puts_at` | `ebx` `PutAtRequest` (row, col, color, text, len); tulis tanpa memindah cursor |
 
-Layanan 0-7 mengikuti tabel buku Chapter 3. Layanan 10-16 disiapkan untuk Chapter 4 dan kontraknya
-didefinisikan di `src/header/syscall.h`.
+Layanan 0-7 mengikuti tabel buku Chapter 3. Layanan 10-16 disiapkan untuk Chapter 4, layanan 18
+(`puts_at`) adalah tambahan agar clock dapat menulis di baris 24; kontraknya didefinisikan di
+`src/header/syscall.h`.
 
 Shell menyediakan REPL dengan current working directory, output buffer untuk pipeline, serta perintah
 `cd`, `ls`, `mkdir`, `cat`, `cp`, `rm`, `mv`, `find`, `grep`, `exec`, `ps`, `kill`, `export`, dan `help`.
 Aplikasi eksternal yang disiapkan adalah `hello-world`, `counter`, dan `clock`.
 
 PATH bersifat dinamis dan persisten: `export PATH=...`, `export PATH+=...`, dan `export PATH-=...`
-mengubah daftar direktori, menyimpannya sebagai file `/path` di root, dan memuatnya kembali saat shell
+mengubah daftar direktori, menyimpannya sebagai file `/.bin/.path`, dan memuatnya kembali saat shell
 dijalankan. Nama perintah tanpa slash dicari pada setiap direktori PATH, lalu pada current working
 directory. Perintah `export` tanpa argumen menampilkan PATH saat ini.
 

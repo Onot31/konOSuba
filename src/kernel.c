@@ -22,10 +22,17 @@ void kernel_setup(void) {
     set_tss_register();
 
     // Shell request
+    uint32_t shell_parent = EXT2_ROOT_INODE;
+    uint32_t bin_inode;
+    uint8_t bin_type;
+    if (find_directory_entry(EXT2_ROOT_INODE, ".bin", 4, &bin_inode, &bin_type)
+        && bin_type == EXT2_FT_DIR)
+        shell_parent = bin_inode;
+
     struct EXT2DriverRequest request = {
         .buf          = (uint8_t*) 0,
         .name         = "shell",
-        .parent_inode = 1,
+        .parent_inode = shell_parent,
         .buffer_size  = 0x100000,
         .name_len     = 5,
     };

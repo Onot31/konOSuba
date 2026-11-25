@@ -6,10 +6,12 @@
 #define FRAMEBUFFER_MEMORY_OFFSET ((uint8_t*) 0xC00B8000)
 #define FRAMEBUFFER_WIDTH  80
 #define FRAMEBUFFER_HEIGHT 25
+#define FRAMEBUFFER_TEXT_HEIGHT 24
 
 void framebuffer_write(uint8_t row, uint8_t col, char c, uint8_t fg, uint8_t bg);
 void framebuffer_putchar(char c, uint8_t fg, uint8_t bg);
 void framebuffer_puts(const char *s, uint32_t len, uint8_t fg, uint8_t bg);
+void framebuffer_puts_at(uint8_t row, uint8_t col, const char *s, uint32_t len, uint8_t fg, uint8_t bg);
 void framebuffer_set_cursor(uint8_t r, uint8_t c);
 void framebuffer_get_cursor(uint8_t *r, uint8_t *c);
 void framebuffer_clear(void);

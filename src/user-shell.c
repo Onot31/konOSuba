@@ -32,9 +32,9 @@
 #define FIND_QUEUE_MAX    128
 
 #define PATH_DIR_MAX      8
-#define PATH_STORE_NAME   "path"
-#define PATH_STORE_NAMELEN 4u
-#define PATH_DEFAULT_DIR  "/"
+#define PATH_STORE_NAME   ".path"
+#define PATH_STORE_NAMELEN 5u
+#define PATH_DEFAULT_DIR  "/.bin"
 
 struct PathRef {
     uint32_t parent_inode;
@@ -528,22 +528,32 @@ static int change_directory(const char *path) {
 
 /* ---------- file helpers ---------- */
 
-static uint32_t buffer_data_len(const uint8_t *buf, uint32_t cap) {
-    uint32_t len = 0;
-    while (len < cap && buf[len] != 0) len++;
-    return len;
-}
-
 static int8_t read_file_entry(uint32_t parent, const char *name, uint8_t name_len,
                               uint32_t *out_len) {
-    int8_t rc;
-    memset(file_buffer, 0, FILE_BUFFER_SIZE);
-    rc = fs_read(parent, name, name_len, file_buffer, FILE_BUFFER_SIZE);
+    uint32_t low = 0;
+    uint32_t high = FILE_BUFFER_SIZE;
+    int8_t rc = fs_read(parent, name, name_len, file_buffer, 0);
+
+    if (rc != 2) {
+        *out_len = 0;
+        return rc;
+    }
+    while (low + 1 < high) {
+        uint32_t mid = low + (high - low) / 2;
+        rc = fs_read(parent, name, name_len, file_buffer, mid);
+        if (rc == 0)
+            high = mid;
+        else if (rc == 2)
+            low = mid;
+        else
+            return rc;
+    }
+    rc = fs_read(parent, name, name_len, file_buffer, high);
     if (rc != 0) {
         *out_len = 0;
         return rc;
     }
-    *out_len = buffer_data_len(file_buffer, FILE_BUFFER_SIZE);
+    *out_len = high;
     return 0;
 }
 
@@ -706,13 +716,21 @@ static bool path_remove_spec(const char *spec) {
     return true;
 }
 
+static uint32_t path_store_inode(void) {
+    struct PathRef ref;
+
+    if (resolve_entry("/.bin", &ref) == 0 && ref.type == EXT2_FT_DIR)
+        return ref.inode;
+    return EXT2_ROOT_INODE;
+}
+
 static void path_load(void) {
     uint32_t len = 0;
     uint32_t start = 0;
     uint32_t i;
 
     path_dir_count = 0;
-    if (read_file_entry(EXT2_ROOT_INODE, PATH_STORE_NAME, PATH_STORE_NAMELEN, &len) == 0
+    if (read_file_entry(path_store_inode(), PATH_STORE_NAME, PATH_STORE_NAMELEN, &len) == 0
         && len > 0) {
         for (i = 0; i <= len; i++) {
             if (i == len || file_buffer[i] == '\n') {
@@ -746,8 +764,8 @@ static int path_save(void) {
         path_store_buffer[len++] = '\n';
     }
 
-    fs_delete(EXT2_ROOT_INODE, PATH_STORE_NAME, (uint8_t)PATH_STORE_NAMELEN, false);
-    return fs_write(EXT2_ROOT_INODE, PATH_STORE_NAME, (uint8_t)PATH_STORE_NAMELEN,
+    fs_delete(path_store_inode(), PATH_STORE_NAME, (uint8_t)PATH_STORE_NAMELEN, false);
+    return fs_write(path_store_inode(), PATH_STORE_NAME, (uint8_t)PATH_STORE_NAMELEN,
                     path_store_buffer, len, false);
 }
 
@@ -852,7 +870,7 @@ static void cmd_ls(int argc, char **argv, struct Output *out) {
     }
 
     while (dir_next(&offset, &entry)) {
-        if (is_dot_entry(&entry)) continue;
+        if (entry.name_len == 0 || entry.name[0] == '.') continue;
         out_str_n(out, entry.name, entry.name_len);
         if (entry.type == EXT2_FT_DIR) out_char(out, '/');
         out_char(out, '\n');
@@ -1547,8 +1565,10 @@ int main(void) {
     for (;;) {
         uint32_t len;
 
+        emit("konOSuba", 8, 0x0A);
+        emit(":", 1, 0x0A);
         emit(cwd_path, s_len(cwd_path), COLOR_PATH);
-        emit(" $ ", 3, COLOR_DEFAULT);
+        emit("$ ", 2, COLOR_DEFAULT);
 
         len = read_line(line_buffer, LINE_MAX);
         if (len == 0) continue;

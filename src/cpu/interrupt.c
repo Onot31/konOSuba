@@ -264,6 +264,18 @@ uint32_t syscall_dispatcher(struct InterruptFrame *frame) {
                 return 0;
             }
 
+        case SYSCALL_PUTS_AT:
+            {
+                struct PutAtRequest *req;
+                if (!paging_is_user_range((const void *)arg1, sizeof(struct PutAtRequest)))
+                    return (uint32_t)-1;
+                req = (struct PutAtRequest *)arg1;
+                if (req->len > 0 && !paging_is_user_range(req->text, req->len))
+                    return (uint32_t)-1;
+                framebuffer_puts_at(req->row, req->col, req->text, req->len, req->color, 0);
+                return 0;
+            }
+
         default:
             return (uint32_t)-1;
     }
