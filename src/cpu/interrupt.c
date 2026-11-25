@@ -136,6 +136,26 @@ uint32_t syscall_dispatcher(struct InterruptFrame *frame) {
                     process_destroy(current->metadata.pid);
                 scheduler_switch_to_next_process();
             }
+        
+        case 11: // Syscall 11: Exec (Buat proses baru)
+            return (uint32_t)process_create_user_process(*(struct EXT2DriverRequest*)frame->cpu.general.ebx);
+
+        case 12: // Syscall 12: Kill (Hentikan proses berdasarkan PID)
+            return process_destroy(frame->cpu.general.ebx) ? 0 : (uint32_t)-1;
+
+        case 13: // Syscall 13: PS (Ambil daftar proses aktif)
+            {
+                typeof(_process_list[0].metadata) *buf = (void*)frame->cpu.general.ebx;
+                uint32_t max_count = frame->cpu.general.ecx;
+                uint32_t count = 0;
+
+                for (int i = 0; i < PROCESS_COUNT_MAX && count < max_count; i++) {
+                    if (_process_list[i].metadata.state != PROCESS_STATE_INACTIVE) {
+                        buf[count++] = _process_list[i].metadata;
+                    }
+                }
+                return count;
+            }
 
         default: // Syscall tidak valid
             return (uint32_t)-1;
