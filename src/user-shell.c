@@ -1217,7 +1217,41 @@ static void cmd_help(struct Output *out) {
     out_str(out, "pipeline : command1 | command2 | ...\n");
 }
 
+static int32_t process_find_active_name(const char *name, uint32_t name_len) {
+    int32_t count;
+
+    if (name_len >= PROCESS_INFO_NAME_LEN) return 0;
+
+    memset(process_info_buffer, 0, sizeof(process_info_buffer));
+    count = syscall(SYSCALL_PS, (uint32_t)process_info_buffer, PROCESS_INFO_MAX, 0);
+    if (count < 0) return -1;
+    if (count > PROCESS_INFO_MAX) count = PROCESS_INFO_MAX;
+
+    for (int32_t i = 0; i < count; i++) {
+        if (process_info_buffer[i].state != USER_PROCESS_STATE_INACTIVE
+            && process_info_buffer[i].name[name_len] == '\0'
+            && s_eq_n(process_info_buffer[i].name, name, name_len))
+            return 1;
+    }
+    return 0;
+}
+
 static void exec_entry(const struct PathRef *ref, struct Output *out) {
+    if (ref->name_len == 5 && s_eq_n(ref->name, "shell", 5)) {
+        out_str(out, "exec: shell tidak dapat dijalankan sebagai aplikasi terpisah\n");
+        return;
+    }
+    if (ref->name_len == 5 && s_eq_n(ref->name, "clock", 5)) {
+        int32_t clock_running = process_find_active_name("clock", 5);
+        if (clock_running != 0) {
+            if (clock_running > 0)
+                out_str(out, "clock: sudah berjalan; tutup dulu sebelum menjalankan lagi\n");
+            else
+                out_str(out, "clock: tidak bisa memeriksa proses aktif\n");
+            return;
+        }
+    }
+
     int32_t rc = syscall(SYSCALL_EXEC, ref->parent_inode,
                          (uint32_t)ref->name, ref->name_len);
 
@@ -1297,6 +1331,19 @@ static void cmd_ps(int argc, char **argv, struct Output *out) {
     }
 }
 
+static void clock_dock_clear(void) {
+    static const char blank[8] = "        ";
+    struct PutAtRequest request;
+
+    request.row = 24;
+    request.col = 68;
+    request.color = COLOR_DEFAULT;
+    request._pad = 0;
+    request.text = blank;
+    request.len = sizeof(blank);
+    syscall(SYSCALL_PUTS_AT, (uint32_t)&request, 0, 0);
+}
+
 static bool parse_pid(const char *text, uint32_t *out) {
     uint32_t value = 0;
 
@@ -1349,6 +1396,12 @@ static void cmd_kill(int argc, char **argv, struct Output *out) {
     if (rc < 0) {
         out_str(out, "kill: gagal (PID tidak ditemukan atau syscall belum tersedia)\n");
         return;
+    }
+    for (i = 0; i < count; i++) {
+        if (process_info_buffer[i].pid == pid
+            && process_name_len(&process_info_buffer[i]) == 5
+            && s_eq_n(process_info_buffer[i].name, "clock", 5))
+            clock_dock_clear();
     }
     out_str(out, "kill: PID ");
     out_u32(out, pid);

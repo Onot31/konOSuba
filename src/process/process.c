@@ -7,10 +7,8 @@ struct ProcessControlBlock _process_list[PROCESS_COUNT_MAX] = {0};
 
 static struct {
     uint32_t active_process_count;
-    uint32_t next_pid;
 } process_manager_state = {
     .active_process_count = 0,
-    .next_pid             = 0,
 };
 
 static uint32_t ceil_div(uint32_t numerator, uint32_t denominator) {
@@ -26,7 +24,18 @@ static int32_t process_list_get_inactive_index(void) {
 }
 
 static uint32_t process_generate_new_pid(void) {
-    return process_manager_state.next_pid++;
+    for (uint32_t pid = 0;; pid++) {
+        bool used = false;
+        for (int32_t i = 0; i < PROCESS_COUNT_MAX; i++) {
+            if (_process_list[i].metadata.state != PROCESS_STATE_INACTIVE
+                && _process_list[i].metadata.pid == pid) {
+                used = true;
+                break;
+            }
+        }
+        if (!used)
+            return pid;
+    }
 }
 
 struct ProcessControlBlock* process_get_current_running_pcb_pointer(void) {

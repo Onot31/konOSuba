@@ -175,9 +175,11 @@ find clock | grep clock
 |----------|----------|
 | `hello-world` | Mencetak `Hello World!` lalu selesai. |
 | `counter` | Mencetak `counter: <n>` satu baris per detik; hentikan dengan `kill <PID>`. |
-| `clock` | Menampilkan `HH:MM:SS` di kanan bawah layar (baris 24, kolom 68) dan memperbarui setiap detik. |
+| `clock` | Menampilkan `HH:MM:SS` di kanan bawah layar (baris 24, kolom 68) dan memperbarui setiap detik; hanya satu proses `clock` dapat aktif. |
 
 Aplikasi dapat dijalankan dengan `exec <nama>`, `exec .bin/<nama>`, atau langsung `<nama>`.
+`shell` dimulai oleh kernel dan tidak dapat dijalankan lagi sebagai aplikasi terpisah.
+`clock` dapat dijalankan kembali setelah proses yang sedang aktif ditutup atau dihentikan dengan `kill`.
 
 ### Contoh sesi
 

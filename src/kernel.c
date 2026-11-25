@@ -3,6 +3,7 @@
 #include "header/cpu/gdt.h"
 #include "header/cpu/interrupt.h"
 #include "header/cpu/idt.h"
+#include "header/cpu/portio.h"
 #include "header/driver/framebuffer.h"
 #include "header/driver/keyboard.h"
 #include "header/kernel-entrypoint.h"
@@ -15,6 +16,8 @@ void kernel_setup(void) {
     pic_remap();
     initialize_idt();
     activate_keyboard_interrupt();
+    out(0x3C4, 0x01);
+    out(0x3C5, in(0x3C5) | 0x01);
     framebuffer_clear();
     framebuffer_set_cursor(0, 0);
     initialize_filesystem_ext2();
