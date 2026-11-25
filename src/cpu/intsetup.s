@@ -46,9 +46,11 @@ segment_register_setup:
     popf
 
     ; Use the current esp as base stack frame, this is only for main_interrupt_handler()
-    mov  ebp, esp 
+    mov  ebp, esp
+    push ebp
     ; Call the C function
     call main_interrupt_handler
+    add  esp, 4
 
     ; Restore general-purpose & index register
     popad   ; Note: This instruction is not fully symmetric with pushad. $esp value is skipped

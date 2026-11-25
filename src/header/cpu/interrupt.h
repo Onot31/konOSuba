@@ -70,7 +70,7 @@ void pic_remap(void);
 void activate_keyboard_interrupt(void);
 
 /* Main ISR */
-void main_interrupt_handler(struct InterruptFrame frame);
+void main_interrupt_handler(struct InterruptFrame *frame);
 
 /* Syscall handler, dipanggil dari main_interrupt_handler. Nilai balik dikirim ke user lewat eax */
 uint32_t syscall_dispatcher(struct InterruptFrame *frame);

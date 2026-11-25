@@ -5,15 +5,12 @@
 
 <img src="mascot.png" width="720" alt="Maskot konOSuba: Darkness, Kazuma, Aqua, dan Megumin">
 
-Credit: karakter dari *KonoSuba: God's Blessing on This Wonderful World!*
-(Natsume Akatsuki / Kurone Mishima).
-
 ## Daftar Isi
 
 - [Informasi Umum](#informasi-umum)
-- [Anggota Kelompok](#anggota-kelompok)
 - [Fitur](#fitur)
 - [Cara Run](#cara-run)
+- [Daftar Perintah Shell](#daftar-perintah-shell)
 - [Debug](#debug)
 - [Arsitektur](#arsitektur)
   - [Urutan boot](#urutan-boot)
@@ -35,12 +32,7 @@ Credit: karakter dari *KonoSuba: God's Blessing on This Wonderful World!*
 | File system | EXT2 edisi IF2130 pada disk 4 MiB |
 | Antarmuka | Shell user mode: REPL, pipeline, perintah bawaan, dan aplikasi eksternal |
 | Emulator | QEMU (`qemu-system-i386`) |
-| Status | Implementasi Bab 1-3 tersedia; integrasi user mode, syscall, dan scheduler Bab 4 sedang dikerjakan |
-
-## Anggota Kelompok
-
-| Nama | NIM | Bagian utama |
-| :--- | :-- | :----------- |
+| Status | Bab 1-4 terintegrasi: user mode, syscall 0-7 dan 10-16, scheduler, aplikasi eksternal, serta PATH persisten |
 
 ## Fitur
 
@@ -63,15 +55,17 @@ Fitur bertanda `[x]` sudah berjalan pada build saat ini, sedangkan `[ ]` masih d
 **File system**
 
 - [x] EXT2 edisi IF2130: inisialisasi, read, read directory, write, dan delete.
-- [x] Struktur disk 8 block group, 64 inode per grup, serta alokasi block langsung dan indirect.
+- [x] Struktur disk 8 block group, 64 inode per grup, serta alokasi block langsung, single indirect,
+  double indirect, dan triple indirect. Writer dapat melakukan rollback dan menambah block direktori.
+- [x] Inserter mengembalikan exit code nonzero saat gagal dan mendukung nama file tanpa path.
 
 **Program user dan shell**
 
-- [ ] User mode dan system call. Rangka `crt0.s`, `user-linker.ld`, TSS, dan
-  `kernel_execute_user_program` sudah tersedia; integrasi ke kernel masih berjalan.
-- [ ] Shell dan aplikasi user. Source `src/user-shell.c`, `src/user-hello-world.c`,
-  `src/user-counter.c`, dan `src/user-clock.c` sudah tersedia dan menunggu user mode serta syscall.
-- [ ] Process, scheduler, dan multitasking.
+- [x] User mode dan system call 0-7 serta 10-16 melalui `int $0x30`, dengan validasi pointer user.
+- [x] Shell dan aplikasi user: `hello-world`, `counter`, dan `clock` berjalan sebagai proses terpisah.
+- [x] Process, scheduler round-robin, context switch, `exec`, `ps`, `kill`, dan `exit`.
+- [x] RTC CMOS (`get_time`) serta pengaturan dan pembacaan cursor teks.
+- [x] PATH persisten dengan `export PATH=`, `export PATH+=`, dan `export PATH-=`.
 
 ## Cara Run
 
@@ -85,8 +79,9 @@ sudo apt install build-essential nasm genisoimage qemu-system-x86 qemu-utils
 **Build dan jalankan**
 
 ```bash
-make build   # build bin/OS2025.iso
-make run     # build, lalu QEMU menunggu debugger (flag -s -S); lihat bagian Debug
+make build       # build bin/OS2025.iso
+make run         # build, masukkan shell + aplikasi ke storage, lalu jalankan QEMU
+make run-debug   # sama seperti run, tetapi QEMU menunggu debugger (-s -S)
 ```
 
 **Target Makefile**
@@ -96,18 +91,21 @@ make run     # build, lalu QEMU menunggu debugger (flag -s -S); lihat bagian Deb
 | `make build` | Kernel dan `bin/OS2025.iso` |
 | `make kernel` | `bin/kernel` saja |
 | `make iso` | ISO bootable `bin/OS2025.iso` |
-| `make run` | Build lengkap lalu QEMU dengan gdb server aktif |
+| `make run` | Build lengkap, insert shell/apps, lalu menjalankan QEMU |
+| `make run-debug` | Seperti `make run`, tetapi QEMU dengan gdb server aktif |
 | `make user-shell` | `bin/shell` (flat binary) dan `bin/shell_elf` (ELF32 untuk gdb) |
 | `make user-apps` | `bin/hello-world`, `bin/counter`, `bin/clock` beserta versi `*_elf` |
+| `make insert-shell` | Memasukkan `bin/shell` ke root storage |
+| `make insert-apps` | Memasukkan ketiga aplikasi eksternal ke root storage |
 | `make disk` | Menimpa `bin/storage.bin` dengan disk kosong 4 MiB |
 | `make clean` | Menghapus kernel, ISO, dan object file (disk tidak ikut terhapus) |
 
 Disk image `bin/storage.bin` (4 MiB) dibuat otomatis saat `make run` jika belum ada dan **tidak** dibuat
 ulang pada run berikutnya, sehingga isi file system tetap tersimpan antar sesi.
 
-Binary program user yang dihasilkan Makefile masih berupa file di `bin/`. Agar dapat dibaca kernel,
-file tersebut perlu dimasukkan ke `storage.bin` melalui Inserter dari kit dengan `EXT2DriverRequest`
-yang menunjuk parent inode direktori tujuan.
+Binary program user dihasilkan di `bin/`, lalu target `insert-shell` dan `insert-apps` memasukkannya
+ke `storage.bin` melalui `bin/inserter` dengan parent inode root (`1`). Target `make run` selalu
+menjalankan kedua target insert tersebut, sedangkan Isi file system lain tetap tersimpan.
 
 **Catatan WSL**
 
@@ -115,10 +113,87 @@ yang menunjuk parent inode direktori tujuan.
 - Jendela QEMU membutuhkan WSLg (Windows 11) atau X server. Jika muncul error `gtk initialization failed`,
   pastikan `echo $DISPLAY` tidak kosong.
 
+## Daftar Perintah Shell
+
+Shell berjalan di ring 3 dan menampilkan prompt `<cwd> $`. Satu baris adalah satu pipeline; argumen
+dipisahkan spasi atau tab (tanpa tanda kutip), maksimal 16 argumen per perintah dan 8 tahap pipeline.
+
+### Perintah bawaan
+
+| Perintah | Sintaks | Keterangan |
+|----------|---------|------------|
+| `cd` | `cd [path]` | Pindah direktori; tanpa argumen kembali ke `/`. |
+| `ls` | `ls [path]` | Daftar isi direktori; nama direktori diberi akhiran `/`. |
+| `mkdir` | `mkdir <nama>` | Membuat satu direktori di direktori aktif. |
+| `cat` | `cat <file>` | Menampilkan isi file; file lebih besar dari 64 KiB ditolak. |
+| `cp` | `cp <sumber> <tujuan>` | Menyalin file; tujuan tidak boleh sudah ada. |
+| `rm` | `rm <file>` | Menghapus file. |
+| `mv` | `mv <sumber> <tujuan>` | Memindah file atau direktori secara rekursif. |
+| `find` | `find <nama>` | Mencari nama persis (case-sensitive) dari root dan mencetak path lengkapnya. |
+| `grep` | `grep <pola> [file]` | Mencetak baris yang mengandung pola; tanpa argumen file memakai input pipeline. |
+| `exec` | `exec <aplikasi>` | Menjalankan aplikasi sebagai proses baru. |
+| `ps` | `ps` | Tabel proses aktif: PID, nama, dan state `RUNNING`/`READY`. |
+| `kill` | `kill <PID>` | Menghentikan proses; PID 0 dan shell sendiri ditolak. |
+| `export` | `export [PATH]` | Menampilkan PATH yang sedang aktif. |
+| `export` | `export PATH=<dir>[:...]` | Mengganti seluruh PATH. |
+| `export` | `export PATH+=<dir>[:...]` | Menambahkan direktori ke PATH. |
+| `export` | `export PATH-=<dir>[:...]` | Menghapus direktori dari PATH. |
+| `help` | `help` | Ringkasan perintah. |
+
+Path boleh relatif (`../docs`) maupun absolut (`/docs`).
+
+### Pipeline
+
+Output satu perintah dapat dioper ke perintah berikutnya dengan `|`:
+
+```text
+ls | grep clock
+find clock | grep clock
+```
+
+- Maksimal 8 tahap; hanya output tahap terakhir yang ditampilkan.
+- Tiap tahap memakai buffer 64 KiB; bila output lebih besar muncul `shell: output truncated`.
+
+### PATH dan aplikasi eksternal
+
+- PATH default `/` dan menyimpan maksimal 8 direktori.
+- Disimpan sebagai file `/path` di root, lalu dimuat kembali setiap shell dijalankan.
+- Perintah tanpa `/` dicari berurutan pada direktori PATH, lalu pada direktori aktif.
+
+| Aplikasi | Perilaku |
+|----------|----------|
+| `hello-world` | Mencetak `Hello World!` lalu selesai. |
+| `counter` | Mencetak `counter: <n>` satu baris per detik; hentikan dengan `kill <PID>`. |
+| `clock` | Menampilkan `HH:MM:SS` di kanan bawah layar (baris 24, kolom 68) dan memperbarui setiap detik. |
+
+Aplikasi dapat dijalankan dengan `exec <nama>` atau langsung `<nama>`.
+
+### Contoh sesi
+
+```text
+/ $ ls
+hello-world
+counter
+clock
+/ $ mkdir docs
+/ $ cp hello-world docs/hello
+/ $ cd docs
+/docs $ find hello
+/docs/hello
+/docs $ hello
+exec: proses hello dijalankan
+/docs $ ps
+```
+
+### Batasan
+
+Belum tersedia quoting, redirection (`>`, `<`), wildcard, opsi `-`, riwayat perintah, dan tab
+completion. Input hanya menerima karakter ASCII yang dapat dicetak dan backspace.
+
 ## Debug
 
-`make run` memakai `-s -S`: QEMU membuka gdb server di `localhost:1234` dan berhenti sampai debugger
-menyambung.
+`make run-debug` memakai `-s -S`: QEMU membuka gdb server di `localhost:1234` dan berhenti sampai
+debugger menyambung. Gunakan `make run` untuk menjalankan OS secara normal.
 
 ```bash
 gdb bin/kernel
@@ -184,7 +259,7 @@ Storage 4 MiB (`bin/storage.bin`), block 512 byte, LBA zero-indexed.
 | `g*1024` ... | Grup `g` (1..7): block bitmap, inode bitmap, 16 block inode table, lalu data |
 
 - 8 grup x 1024 block, 64 inode per grup (inode 128 byte, 4 inode per block).
-- Inode memakai 12 direct block, 1 indirect, dan 1 doubly indirect.
+- Inode memakai 12 direct block, single indirect, double indirect, dan triple indirect.
 - Directory memakai format entry ext2 standar (`inode`, `rec_len`, `name_len`, `file_type`, nama).
 
 Mengecek disk dengan hex editor: offset byte = `LBA * 0x200`. Contoh: block 21 (root directory)
@@ -222,9 +297,10 @@ Shell menyediakan REPL dengan current working directory, output buffer untuk pip
 `cd`, `ls`, `mkdir`, `cat`, `cp`, `rm`, `mv`, `find`, `grep`, `exec`, `ps`, `kill`, `export`, dan `help`.
 Aplikasi eksternal yang disiapkan adalah `hello-world`, `counter`, dan `clock`.
 
-PATH bersifat dinamis dan persisten: `export PATH=...` atau `export PATH+=...` mengubah daftar direktori,
-menyimpannya sebagai file `/path` di root, dan memuatnya kembali saat shell dijalankan. Nama perintah
-tanpa slash dicari pada setiap direktori PATH, lalu pada current working directory.
+PATH bersifat dinamis dan persisten: `export PATH=...`, `export PATH+=...`, dan `export PATH-=...`
+mengubah daftar direktori, menyimpannya sebagai file `/path` di root, dan memuatnya kembali saat shell
+dijalankan. Nama perintah tanpa slash dicari pada setiap direktori PATH, lalu pada current working
+directory. Perintah `export` tanpa argumen menampilkan PATH saat ini.
 
 ## Struktur Repository
 
@@ -248,7 +324,7 @@ konOSuba/
     user-counter.c        aplikasi eksternal pencacah
     user-clock.c          program clock
     cpu/                  gdt, idt, interrupt, portio
-    driver/               framebuffer, keyboard, disk
+    driver/               framebuffer, keyboard, cmos, disk
     filesystem/           ext2
     memory/               paging dan memory manager
     stdlib/               string

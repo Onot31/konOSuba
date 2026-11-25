@@ -239,6 +239,32 @@ struct PageDirectory* paging_get_current_page_directory_addr(void) {
     return (struct PageDirectory*)(current_page_directory_phys_addr + 0xC0000000u);
 }
 
+bool paging_is_user_range(const void *ptr, uint32_t size) {
+    if (size == 0)
+        return true;
+
+    uint32_t start = (uint32_t)ptr;
+    if (start >= 0xC0000000u || size > 0xC0000000u - start)
+        return false;
+
+    uint32_t last_page = (start + size - 1u) >> 12;
+    struct PageDirectory *page_dir = paging_get_current_page_directory_addr();
+
+    for (uint32_t page = start >> 12; page <= last_page; page++) {
+        struct PageDirectoryEntry *pde = &page_dir->table[page >> 10];
+        if (!pde->flag.present_bit || !pde->flag.user_bit)
+            return false;
+
+        struct PageTable *page_table = (struct PageTable *)(
+            RECURSIVE_PAGE_TABLES_VIRTUAL_ADDRESS + (page >> 10) * PAGE_FRAME_SIZE
+        );
+        struct PageTableEntry *pte = &page_table->table[page & 0x3FF];
+        if (!pte->flag.present_bit || !pte->flag.user_bit)
+            return false;
+    }
+    return true;
+}
+
 void paging_use_page_directory(struct PageDirectory *page_dir_virtual_addr) {
     uint32_t physical_addr_page_dir = (uint32_t) page_dir_virtual_addr;
     if ((uint32_t) page_dir_virtual_addr >= 0xC0000000u)

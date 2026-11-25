@@ -76,23 +76,30 @@ int main(int argc, char *argv[]) {
     size_t filesize = fread(file_buffer, 1, 4*1024*1024, fptr_target);
     fclose(fptr_target);
 
-    printf("Filename : %s\n",  target_path);
+    const char *name = strrchr(target_path, '/');
+    name = (name == NULL) ? target_path : name + 1;
+
+    printf("Filename : %s\n",  name);
     printf("Filesize : %ld bytes\n", filesize);
-    int filename_length = strlen(target_path);
+    size_t filename_length = strlen(name);
+    if (filename_length == 0 || filename_length > 255) {
+        fprintf(stderr, "inserter: invalid file name '%s'\n", name);
+        fclose(fptr);
+        exit(1);
+    }
+
     initialize_filesystem_ext2();
-    char *name = (char *) target_path;
     struct EXT2DriverRequest request;
     struct EXT2DriverRequest reqread;
     printf("Filename       : %s\n", name);
-    printf("Filename length: %d\n", filename_length);
+    printf("Filename length: %zu\n", filename_length);
 
     request.buf = file_buffer;
     request.buffer_size = filesize;
-    request.name = name;
-    request.name_len = filename_length;
+    request.name = (char *) name;
+    request.name_len = (uint8_t) filename_length;
     request.is_directory = false;
     sscanf(parent_str, "%u", &request.parent_inode);
-    sscanf(target_path, "%s", request.name);
 
     reqread = request;
     reqread.buf = read_buffer;
@@ -127,8 +134,12 @@ int main(int argc, char *argv[]) {
         puts("Error: Unknown error");
 
     fseek(fptr, 0, SEEK_SET);
-    fwrite(image_storage, 4 * 1024 * 1024, 1, fptr);
+    if (fwrite(image_storage, 4 * 1024 * 1024, 1, fptr) != 1) {
+        fprintf(stderr, "inserter: failed to write storage\n");
+        fclose(fptr);
+        return 1;
+    }
     fclose(fptr);
 
-    return 0;
+    return retcode == 0 ? 0 : 1;
 }

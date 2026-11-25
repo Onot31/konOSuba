@@ -661,6 +661,10 @@ int8_t delete(struct EXT2DriverRequest request) {
 
     if (!remove_directory_entry(request.parent_inode, target_inode)) return -1;
 
+    if (inode_is_dir(&node) && parent.i_links_count > 0)
+        parent.i_links_count--;
+    write_inode(request.parent_inode, &parent);
+
     free_inode_blocks(&node);
     free_inode(target_inode);
     commit_metadata();
@@ -668,114 +672,219 @@ int8_t delete(struct EXT2DriverRequest request) {
     return 0;
 }
 
-/* TODO(D): tulis file/folder */
+static uint32_t allocate_zero_block(uint32_t preferred_bgd) {
+    uint32_t lba = allocate_block(preferred_bgd);
+    if (lba == 0)
+        return 0;
+
+    struct BlockBuffer zero;
+    memset(&zero, 0, sizeof(zero));
+    write_blocks(&zero, lba, 1);
+    return lba;
+}
+
+static bool write_pointer_entry(uint32_t block, uint32_t index, uint32_t value) {
+    struct BlockBuffer buf;
+    if (!read_block_checked(&buf, block))
+        return false;
+
+    memcpy(buf.buf + index * sizeof(uint32_t), &value, sizeof(uint32_t));
+    write_blocks(&buf, block, 1);
+    return true;
+}
+
+static bool inode_set_block(struct EXT2Inode *inode, uint32_t index,
+                            uint32_t lba, uint32_t preferred_bgd) {
+    if (index < EXT2_DIRECT_BLOCKS) {
+        inode->i_block[index] = lba;
+        return true;
+    }
+
+    index -= EXT2_DIRECT_BLOCKS;
+
+    if (index < EXT2_PTRS_PER_BLOCK) {
+        if (inode->i_block[12] == 0) {
+            inode->i_block[12] = allocate_zero_block(preferred_bgd);
+            if (inode->i_block[12] == 0)
+                return false;
+            inode->i_blocks++;
+        }
+        return write_pointer_entry(inode->i_block[12], index, lba);
+    }
+
+    index -= EXT2_PTRS_PER_BLOCK;
+
+    if (index < EXT2_PTRS_PER_BLOCK * EXT2_PTRS_PER_BLOCK) {
+        if (inode->i_block[13] == 0) {
+            inode->i_block[13] = allocate_zero_block(preferred_bgd);
+            if (inode->i_block[13] == 0)
+                return false;
+            inode->i_blocks++;
+        }
+
+        uint32_t top = index / EXT2_PTRS_PER_BLOCK;
+        uint32_t bottom = index % EXT2_PTRS_PER_BLOCK;
+        uint32_t second = read_pointer(inode->i_block[13], top);
+        if (second == 0) {
+            second = allocate_zero_block(preferred_bgd);
+            if (second == 0)
+                return false;
+            inode->i_blocks++;
+            if (!write_pointer_entry(inode->i_block[13], top, second))
+                return false;
+        }
+        return write_pointer_entry(second, bottom, lba);
+    }
+
+    index -= EXT2_PTRS_PER_BLOCK * EXT2_PTRS_PER_BLOCK;
+    if (index >= EXT2_PTRS_PER_BLOCK * EXT2_PTRS_PER_BLOCK * EXT2_PTRS_PER_BLOCK)
+        return false;
+
+    if (inode->i_block[14] == 0) {
+        inode->i_block[14] = allocate_zero_block(preferred_bgd);
+        if (inode->i_block[14] == 0)
+            return false;
+        inode->i_blocks++;
+    }
+
+    uint32_t top = index / (EXT2_PTRS_PER_BLOCK * EXT2_PTRS_PER_BLOCK);
+    uint32_t rest = index % (EXT2_PTRS_PER_BLOCK * EXT2_PTRS_PER_BLOCK);
+    uint32_t second = read_pointer(inode->i_block[14], top);
+    if (second == 0) {
+        second = allocate_zero_block(preferred_bgd);
+        if (second == 0)
+            return false;
+        inode->i_blocks++;
+        if (!write_pointer_entry(inode->i_block[14], top, second))
+            return false;
+    }
+
+    uint32_t middle = rest / EXT2_PTRS_PER_BLOCK;
+    uint32_t bottom = rest % EXT2_PTRS_PER_BLOCK;
+    uint32_t third = read_pointer(second, middle);
+    if (third == 0) {
+        third = allocate_zero_block(preferred_bgd);
+        if (third == 0)
+            return false;
+        inode->i_blocks++;
+        if (!write_pointer_entry(second, middle, third))
+            return false;
+    }
+    return write_pointer_entry(third, bottom, lba);
+}
+
 int8_t write(struct EXT2DriverRequest *request) {
     if (request == NULL) return -1;
-    
+
     struct EXT2Inode parent;
     if (!read_inode(request->parent_inode, &parent)) return 2;
-    if ((parent.i_mode & EXT2_S_IFMT) != EXT2_S_IFDIR) return 2; 
+    if ((parent.i_mode & EXT2_S_IFMT) != EXT2_S_IFDIR) return 2;
 
     uint32_t existing_inode;
     if (find_directory_entry(request->parent_inode, request->name, request->name_len, &existing_inode, NULL)) {
-        return 1; 
+        return 1;
     }
-    
+
+    if (request->name == NULL || request->name_len == 0)
+        return 1;
+    if (!request->is_directory && request->buffer_size > 0 && request->buf == NULL)
+        return -1;
+
+    uint32_t blocks_needed = request->is_directory
+        ? 1
+        : (request->buffer_size + EXT2_BLOCK_SIZE - 1) / EXT2_BLOCK_SIZE;
+    if (blocks_needed > EXT2_TOTAL_BLOCKS)
+        return -1;
+
     uint32_t preferred_bgd = inode_to_bgd(request->parent_inode);
     uint32_t new_inode_num = allocate_inode(preferred_bgd, request->is_directory);
-    if (new_inode_num == 0) return -1; 
+    if (new_inode_num == 0) return -1;
 
     struct EXT2Inode new_inode;
     memset(&new_inode, 0, sizeof(new_inode));
     new_inode.i_mode = request->is_directory ? EXT2_S_IFDIR : EXT2_S_IFREG;
     new_inode.i_links_count = request->is_directory ? 2 : 1;
     new_inode.i_size = request->is_directory ? EXT2_BLOCK_SIZE : request->buffer_size;
- 
-    uint32_t blocks_needed = request->is_directory ? 1 : (request->buffer_size + EXT2_BLOCK_SIZE - 1) / EXT2_BLOCK_SIZE;
-    
-    if (blocks_needed > EXT2_DIRECT_BLOCKS + (EXT2_BLOCK_SIZE / 4)) return -1; 
 
     uint8_t *src_buf = (uint8_t *)request->buf;
     uint32_t remaining = request->buffer_size;
+    bool ok = true;
 
-    struct BlockBuffer indirect_buf;
-    memset(&indirect_buf, 0, sizeof(indirect_buf));
-    uint32_t indirect_lba = 0;
-
-    for (uint32_t i = 0; i < blocks_needed; i++) {
+    for (uint32_t i = 0; i < blocks_needed && ok; i++) {
         uint32_t lba = allocate_block(preferred_bgd);
-        if (lba == 0) return -1;
-        
-        if (i < EXT2_DIRECT_BLOCKS) {
-            new_inode.i_block[i] = lba;
-        } else {
-            if (i == EXT2_DIRECT_BLOCKS) {
-                indirect_lba = allocate_block(preferred_bgd);
-                if (indirect_lba == 0) return -1;
-                new_inode.i_block[EXT2_DIRECT_BLOCKS] = indirect_lba;
-                new_inode.i_blocks++;
-            }
-            uint32_t indirect_index = i - EXT2_DIRECT_BLOCKS;
-            memcpy(indirect_buf.buf + (indirect_index * 4), &lba, 4);
+        if (lba == 0) {
+            ok = false;
+            break;
         }
-        
-        new_inode.i_blocks++;
 
-        if (request->is_directory) {
-            struct BlockBuffer dir_buf;
-            memset(&dir_buf, 0, sizeof(dir_buf));
-            
-            struct EXT2DirectoryEntry dot = { .inode = new_inode_num, .rec_len = get_entry_record_len(1), .name_len = 1, .file_type = EXT2_FT_DIR };
-            struct EXT2DirectoryEntry dotdot = { .inode = request->parent_inode, .rec_len = get_entry_record_len(2), .name_len = 2, .file_type = EXT2_FT_DIR };
-            
-            memcpy(dir_buf.buf, &dot, EXT2_DIRENT_HEADER);
-            memcpy(dir_buf.buf + EXT2_DIRENT_HEADER, ".", 1);
-            memcpy(dir_buf.buf + dot.rec_len, &dotdot, EXT2_DIRENT_HEADER);
-            memcpy(dir_buf.buf + dot.rec_len + EXT2_DIRENT_HEADER, "..", 2);
-            
-            write_blocks(&dir_buf, lba, 1);
-        } else {
-            struct BlockBuffer file_buf;
-            memset(&file_buf, 0, sizeof(file_buf));
-            uint32_t chunk_size = remaining < EXT2_BLOCK_SIZE ? remaining : EXT2_BLOCK_SIZE;
-            
-            if (chunk_size > 0 && src_buf != NULL) {
-                memcpy(file_buf.buf, src_buf + (i * EXT2_BLOCK_SIZE), chunk_size);
-                remaining -= chunk_size;
-            }
-            write_blocks(&file_buf, lba, 1);
+        new_inode.i_blocks++;
+        if (!inode_set_block(&new_inode, i, lba, preferred_bgd)) {
+            free_block(lba);
+            new_inode.i_blocks--;
+            ok = false;
+            break;
         }
+
+        struct BlockBuffer data;
+        memset(&data, 0, sizeof(data));
+        if (request->is_directory) {
+            struct EXT2DirectoryEntry dot = {
+                .inode = new_inode_num,
+                .rec_len = get_entry_record_len(1),
+                .name_len = 1,
+                .file_type = EXT2_FT_DIR
+            };
+            struct EXT2DirectoryEntry dotdot = {
+                .inode = request->parent_inode,
+                .rec_len = get_entry_record_len(2),
+                .name_len = 2,
+                .file_type = EXT2_FT_DIR
+            };
+
+            memcpy(data.buf, &dot, EXT2_DIRENT_HEADER);
+            memcpy(data.buf + EXT2_DIRENT_HEADER, ".", 1);
+            memcpy(data.buf + dot.rec_len, &dotdot, EXT2_DIRENT_HEADER);
+            memcpy(data.buf + dot.rec_len + EXT2_DIRENT_HEADER, "..", 2);
+        } else {
+            uint32_t chunk = remaining < EXT2_BLOCK_SIZE ? remaining : EXT2_BLOCK_SIZE;
+            if (chunk > 0 && src_buf != NULL) {
+                memcpy(data.buf, src_buf + i * EXT2_BLOCK_SIZE, chunk);
+                remaining -= chunk;
+            }
+        }
+        write_blocks(&data, lba, 1);
     }
-    
-    if (indirect_lba != 0) {
-        write_blocks(&indirect_buf, indirect_lba, 1);
+
+    if (!ok || !write_inode(new_inode_num, &new_inode)) {
+        free_inode_blocks(&new_inode);
+        free_inode(new_inode_num);
+        commit_metadata();
+        return -1;
     }
-    write_inode(new_inode_num, &new_inode);
 
     uint32_t parent_blocks = (parent.i_size + EXT2_BLOCK_SIZE - 1) / EXT2_BLOCK_SIZE;
     if (parent_blocks == 0) parent_blocks = parent.i_blocks;
-    
+
     uint16_t req_rec_len = get_entry_record_len(request->name_len);
     bool entry_added = false;
-    
+
     for (uint32_t b = 0; b < parent_blocks && !entry_added; b++) {
         uint32_t lba = get_inode_block(&parent, b);
         if (lba == 0) continue;
-        
+
         struct BlockBuffer pbuf;
         read_blocks(&pbuf, lba, 1);
-        
+
         uint32_t offset = 0;
         while (offset + EXT2_DIRENT_HEADER <= EXT2_BLOCK_SIZE) {
             struct EXT2DirectoryEntry *e = (struct EXT2DirectoryEntry *)(pbuf.buf + offset);
-            
+
             if (e->rec_len < EXT2_DIRENT_HEADER) {
                 e->rec_len = EXT2_BLOCK_SIZE - offset;
-                e->inode = 0; // Pastikan statusnya dihapus/kosong
+                e->inode = 0;
             }
 
             if (e->inode == 0) {
-                
                 if (e->rec_len >= req_rec_len) {
                     e->inode = new_inode_num;
                     e->name_len = request->name_len;
@@ -786,19 +895,18 @@ int8_t write(struct EXT2DriverRequest *request) {
                     break;
                 }
             } else {
-                
                 uint16_t actual_len = get_entry_record_len(e->name_len);
                 if (e->rec_len >= actual_len + req_rec_len) {
                     uint16_t total_len = e->rec_len;
-                    e->rec_len = actual_len; 
-                    
+                    e->rec_len = actual_len;
+
                     struct EXT2DirectoryEntry *new_e = (struct EXT2DirectoryEntry *)(pbuf.buf + offset + actual_len);
                     new_e->inode = new_inode_num;
-                    new_e->rec_len = total_len - actual_len; 
+                    new_e->rec_len = total_len - actual_len;
                     new_e->name_len = request->name_len;
                     new_e->file_type = request->is_directory ? EXT2_FT_DIR : EXT2_FT_REG_FILE;
                     memcpy(pbuf.buf + offset + actual_len + EXT2_DIRENT_HEADER, request->name, request->name_len);
-                    
+
                     write_blocks(&pbuf, lba, 1);
                     entry_added = true;
                     break;
@@ -808,17 +916,26 @@ int8_t write(struct EXT2DriverRequest *request) {
         }
     }
 
-    
     if (!entry_added) {
-        if (parent_blocks >= EXT2_DIRECT_BLOCKS) return -1; 
-        
         uint32_t new_lba = allocate_block(preferred_bgd);
-        if (new_lba == 0) return -1;
-        
-        parent.i_block[parent_blocks] = new_lba;
+        if (new_lba == 0) {
+            free_inode_blocks(&new_inode);
+            free_inode(new_inode_num);
+            commit_metadata();
+            return -1;
+        }
+
         parent.i_blocks++;
+        if (!inode_set_block(&parent, parent_blocks, new_lba, preferred_bgd)) {
+            free_block(new_lba);
+            parent.i_blocks--;
+            free_inode_blocks(&new_inode);
+            free_inode(new_inode_num);
+            commit_metadata();
+            return -1;
+        }
         parent.i_size += EXT2_BLOCK_SIZE;
-        
+
         struct BlockBuffer pbuf;
         memset(&pbuf, 0, sizeof(pbuf));
         struct EXT2DirectoryEntry *new_e = (struct EXT2DirectoryEntry *)pbuf.buf;
@@ -827,12 +944,19 @@ int8_t write(struct EXT2DriverRequest *request) {
         new_e->name_len = request->name_len;
         new_e->file_type = request->is_directory ? EXT2_FT_DIR : EXT2_FT_REG_FILE;
         memcpy(pbuf.buf + EXT2_DIRENT_HEADER, request->name, request->name_len);
-        
         write_blocks(&pbuf, new_lba, 1);
     }
 
-    write_inode(request->parent_inode, &parent);
+    if (request->is_directory)
+        parent.i_links_count++;
+
+    if (!write_inode(request->parent_inode, &parent)) {
+        free_inode_blocks(&new_inode);
+        free_inode(new_inode_num);
+        commit_metadata();
+        return -1;
+    }
+
     commit_metadata();
-    
     return 0;
 }

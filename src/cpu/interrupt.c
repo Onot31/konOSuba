@@ -2,9 +2,13 @@
 #include "header/cpu/portio.h"
 #include "header/driver/keyboard.h"
 #include "header/driver/framebuffer.h"
+#include "header/driver/cmos.h"
 #include "header/filesystem/ext2.h"
+#include "header/memory/paging.h"
+#include "header/stdlib/string.h"
 #include "header/process/process.h"
 #include "header/process/scheduler.h"
+#include "header/syscall.h"
 
 struct TSSEntry _interrupt_tss_entry = {
     .ss0 = 0x10,
@@ -46,16 +50,16 @@ void activate_keyboard_interrupt(void) {
     out(PIC1_DATA, in(PIC1_DATA) & ~(1 << IRQ_KEYBOARD));
 }
 
-void main_interrupt_handler(struct InterruptFrame frame) {
-    switch (frame.int_number) {
+void main_interrupt_handler(struct InterruptFrame *frame) {
+    switch (frame->int_number) {
         case PIC1_OFFSET + IRQ_TIMER:
             pic_ack(IRQ_TIMER);
             // Context switch jika yang terinterupsi user process (ring 3)
-            if ((frame.cs & 0x3) == 0x3) {
+            if ((frame->cs & 0x3) == 0x3) {
                 struct Context ctx = {
-                    .cpu                         = frame.cpu,
-                    .eip                         = frame.eip,
-                    .eflags                      = frame.eflags,
+                    .cpu                         = frame->cpu,
+                    .eip                         = frame->eip,
+                    .eflags                      = frame->eflags,
                     .page_directory_virtual_addr = paging_get_current_page_directory_addr(),
                 };
                 scheduler_save_context_to_current_running_pcb(ctx);
@@ -63,101 +67,204 @@ void main_interrupt_handler(struct InterruptFrame frame) {
             }
             break;
         case SYSCALL_INTERRUPT_VECTOR:
-            // frame berada di kernel stack yang akan di-pop intsetup.s, nilai balik dikirim lewat eax
-            frame.cpu.general.eax = syscall_dispatcher(&frame);
+            frame->cpu.general.eax = syscall_dispatcher(frame);
             break;
         case PIC1_OFFSET + IRQ_KEYBOARD:
             keyboard_isr();
             pic_ack(IRQ_KEYBOARD);
             break;
         default:
-            if (frame.int_number >= PIC1_OFFSET && frame.int_number < PIC1_OFFSET + 8) {
-                pic_ack((uint8_t)(frame.int_number - PIC1_OFFSET));
-            } else if (frame.int_number >= PIC2_OFFSET && frame.int_number < PIC2_OFFSET + 8) {
-                pic_ack((uint8_t)((frame.int_number - PIC2_OFFSET) + 8));
+            if (frame->int_number >= PIC1_OFFSET && frame->int_number < PIC1_OFFSET + 8) {
+                pic_ack((uint8_t)(frame->int_number - PIC1_OFFSET));
+            } else if (frame->int_number >= PIC2_OFFSET && frame->int_number < PIC2_OFFSET + 8) {
+                pic_ack((uint8_t)((frame->int_number - PIC2_OFFSET) + 8));
             }
             break;
     }
 }
 
+static bool syscall_get_request(uint32_t addr, struct EXT2DriverRequest *out) {
+    if (!paging_is_user_range((const void *)addr, sizeof(*out)))
+        return false;
+
+    memcpy(out, (const void *)addr, sizeof(*out));
+
+    if (out->name_len > 0 && !paging_is_user_range(out->name, out->name_len))
+        return false;
+    if (out->buffer_size > 0 && out->buf != NULL
+        && !paging_is_user_range(out->buf, out->buffer_size))
+        return false;
+
+    return true;
+}
+
+static uint32_t syscall_fs_result(int8_t retcode, uint32_t retcode_addr) {
+    if (!paging_is_user_range((const void *)retcode_addr, 1))
+        return (uint32_t)-1;
+    *(int8_t *)retcode_addr = retcode;
+    return (uint32_t)(int32_t)retcode;
+}
+
+static uint32_t syscall_ps(uint32_t buffer_addr, uint32_t capacity) {
+    if (capacity > PROCESS_INFO_MAX)
+        capacity = PROCESS_INFO_MAX;
+    if (capacity == 0)
+        return 0;
+    if (!paging_is_user_range((const void *)buffer_addr,
+                              capacity * sizeof(struct ProcessInfo)))
+        return (uint32_t)-1;
+
+    struct ProcessInfo *buffer = (struct ProcessInfo *)buffer_addr;
+    uint32_t count = 0;
+
+    for (uint32_t i = 0; i < PROCESS_COUNT_MAX && count < capacity; i++) {
+        if (_process_list[i].metadata.state == PROCESS_STATE_INACTIVE)
+            continue;
+
+        struct ProcessInfo info;
+        memset(&info, 0, sizeof(info));
+        info.pid   = _process_list[i].metadata.pid;
+        info.state = (uint32_t)_process_list[i].metadata.state;
+        memcpy(info.name, _process_list[i].metadata.name, PROCESS_INFO_NAME_LEN);
+        info.name[PROCESS_INFO_NAME_LEN - 1] = '\0';
+        buffer[count++] = info;
+    }
+    return count;
+}
+
 uint32_t syscall_dispatcher(struct InterruptFrame *frame) {
     uint32_t syscall_num = frame->cpu.general.eax;
+    uint32_t arg1 = frame->cpu.general.ebx;
+    uint32_t arg2 = frame->cpu.general.ecx;
+    uint32_t arg3 = frame->cpu.general.edx;
 
     switch (syscall_num) {
-        case 0: // Syscall 0: Read
-            return read(*(struct EXT2DriverRequest*)frame->cpu.general.ebx);
-
-        case 1: // Syscall 1: Read Directory
-            return (uint32_t)-1;
-
-        case 2: // Syscall 2: Write
-            return write((struct EXT2DriverRequest*)frame->cpu.general.ebx);
-
-        case 3: // Syscall 3: Delete
-            return (uint32_t)-1;
-
-        case 4: // Syscall 4: Keyboard Getchar
+        case SYSCALL_FS_READ:
+        case SYSCALL_FS_READ_DIRECTORY:
+        case SYSCALL_FS_WRITE:
+        case SYSCALL_FS_DELETE:
             {
+                struct EXT2DriverRequest request;
+                if (!syscall_get_request(arg1, &request))
+                    return (uint32_t)-1;
+
+                int8_t retcode;
+                if (syscall_num == SYSCALL_FS_READ) {
+                    if (request.buffer_size > 0 && request.buf == NULL)
+                        return (uint32_t)-1;
+                    retcode = read(request);
+                } else if (syscall_num == SYSCALL_FS_READ_DIRECTORY) {
+                    if (request.buf == NULL)
+                        return (uint32_t)-1;
+                    retcode = read_directory(&request);
+                } else if (syscall_num == SYSCALL_FS_WRITE) {
+                    if (request.buffer_size > 0 && request.buf == NULL)
+                        return (uint32_t)-1;
+                    retcode = write(&request);
+                } else {
+                    retcode = delete(request);
+                }
+                return syscall_fs_result(retcode, arg2);
+            }
+
+        case SYSCALL_GETCHAR:
+            {
+                if (!paging_is_user_range((const void *)arg1, 1))
+                    return (uint32_t)-1;
+
                 char c = 0;
                 get_keyboard_buffer(&c);
-                return (uint32_t)c;
+                *(char *)arg1 = c;
+                return (uint32_t)(uint8_t)c;
             }
 
-        case 5: // Syscall 5: Putchar (Tulis karakter ke layar)
-            framebuffer_write(frame->cpu.general.ecx, frame->cpu.general.edx, (char)frame->cpu.general.ebx, frame->cpu.index.esi, 0);
-            return 0;
-
-        case 6: // Syscall 6: Puts (Tulis string ke layar)
+        case SYSCALL_PUTCHAR:
             {
-                char* str = (char*)frame->cpu.general.ebx;
-                uint32_t current_col = frame->cpu.general.edx;
-                uint32_t current_row = frame->cpu.general.ecx;
-                
-                while (*str != '\0') {
-                    framebuffer_write(current_row, current_col, *str, frame->cpu.index.esi, 0);
-                    current_col++;
-                    if (current_col >= 80) {
-                        current_col = 0;
-                        current_row++;
-                    }
-                    str++;
-                }
+                uint8_t color = (uint8_t)arg2;
+                framebuffer_putchar((char)arg1, color & 0x0F, (color >> 4) & 0x0F);
+                return 0;
             }
-            return 0;
 
-        case 7: // Syscall 7: Keyboard Activate
+        case SYSCALL_PUTS:
+            {
+                if (arg2 > 0 && !paging_is_user_range((const void *)arg1, arg2))
+                    return (uint32_t)-1;
+
+                uint8_t color = (uint8_t)arg3;
+                framebuffer_puts((const char *)arg1, arg2,
+                                 color & 0x0F, (color >> 4) & 0x0F);
+                return 0;
+            }
+
+        case SYSCALL_KEYBOARD_ACTIVATE:
             keyboard_state_activate();
             return 0;
 
-        case SYSCALL_EXIT: // Syscall 10: Exit, ebx = return code main() (belum dipakai)
+        case SYSCALL_EXIT:
             {
                 struct ProcessControlBlock *current = process_get_current_running_pcb_pointer();
                 if (current != NULL)
                     process_destroy(current->metadata.pid);
                 scheduler_switch_to_next_process();
+                return 0;
             }
-        
-        case 11: // Syscall 11: Exec (Buat proses baru)
-            return (uint32_t)process_create_user_process(*(struct EXT2DriverRequest*)frame->cpu.general.ebx);
 
-        case 12: // Syscall 12: Kill (Hentikan proses berdasarkan PID)
-            return process_destroy(frame->cpu.general.ebx) ? 0 : (uint32_t)-1;
-
-        case 13: // Syscall 13: PS (Ambil daftar proses aktif)
+        case SYSCALL_EXEC:
             {
-                typeof(_process_list[0].metadata) *buf = (void*)frame->cpu.general.ebx;
-                uint32_t max_count = frame->cpu.general.ecx;
-                uint32_t count = 0;
+                if (arg3 == 0 || arg3 > 255
+                    || !paging_is_user_range((const void *)arg2, arg3))
+                    return (uint32_t)-1;
 
-                for (int i = 0; i < PROCESS_COUNT_MAX && count < max_count; i++) {
-                    if (_process_list[i].metadata.state != PROCESS_STATE_INACTIVE) {
-                        buf[count++] = _process_list[i].metadata;
-                    }
-                }
-                return count;
+                char name[256];
+                memcpy(name, (const void *)arg2, arg3);
+                name[arg3] = '\0';
+
+                struct EXT2DriverRequest request = {
+                    .buf          = NULL,
+                    .name         = name,
+                    .name_len     = (uint8_t)arg3,
+                    .parent_inode = arg1,
+                    .buffer_size  = 0x100000,
+                    .is_directory = false,
+                };
+                int32_t create_retcode = process_create_user_process(request);
+                return create_retcode == PROCESS_CREATE_SUCCESS
+                    ? 0
+                    : (uint32_t)(-create_retcode);
             }
 
-        default: // Syscall tidak valid
+        case SYSCALL_PS:
+            return syscall_ps(arg1, arg2);
+
+        case SYSCALL_KILL:
+            {
+                struct ProcessControlBlock *current = process_get_current_running_pcb_pointer();
+                if (current != NULL && current->metadata.pid == arg1)
+                    return (uint32_t)-1;
+                return process_destroy(arg1) ? 0 : (uint32_t)-1;
+            }
+
+        case SYSCALL_GET_TIME:
+            {
+                if (!paging_is_user_range((const void *)arg1, sizeof(struct TimeInfo)))
+                    return (uint32_t)-1;
+                return cmos_read_time((struct TimeInfo *)arg1) ? 0 : (uint32_t)-1;
+            }
+
+        case SYSCALL_MOVE_CURSOR:
+            framebuffer_set_cursor((uint8_t)arg1, (uint8_t)arg2);
+            return 0;
+
+        case SYSCALL_GET_CURSOR:
+            {
+                if (!paging_is_user_range((const void *)arg1, 1)
+                    || !paging_is_user_range((const void *)arg2, 1))
+                    return (uint32_t)-1;
+                framebuffer_get_cursor((uint8_t *)arg1, (uint8_t *)arg2);
+                return 0;
+            }
+
+        default:
             return (uint32_t)-1;
     }
 }

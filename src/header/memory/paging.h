@@ -190,6 +190,12 @@ void flush_single_tlb(void *virtual_addr);
 bool paging_allocate_check(uint32_t amount);
 
 /**
+ * Check whether a range is fully mapped as user-accessible in the current
+ * page directory. Used by syscall entry points before touching user memory.
+ */
+bool paging_is_user_range(const void *ptr, uint32_t size);
+
+/**
  * Allocate single user page frame in page directory
  * 
  * @param page_dir     Page directory to update

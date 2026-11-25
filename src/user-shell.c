@@ -665,6 +665,47 @@ static bool path_set_spec(const char *spec, bool append) {
     return path_dir_count > 0;
 }
 
+static bool path_remove_spec(const char *spec) {
+    uint32_t count = 0;
+    uint32_t kept = 0;
+    const char *cursor = spec;
+    uint32_t i;
+
+    while (*cursor != '\0') {
+        const char *start = cursor;
+        uint32_t len;
+        char entry[PATH_MAX_LEN];
+
+        while (*cursor != '\0' && *cursor != ':') cursor++;
+        len = (uint32_t)(cursor - start);
+        if (*cursor == ':') cursor++;
+        if (len == 0 || len >= PATH_MAX_LEN || start[0] != '/') return false;
+        while (len > 1 && start[len - 1] == '/') len--;
+
+        memcpy(entry, start, len);
+        entry[len] = '\0';
+        for (i = 0; i < count; i++)
+            if (s_cmp(path_temp[i], entry) == 0) break;
+        if (i == count) {
+            if (count >= PATH_DIR_MAX) return false;
+            s_copy(path_temp[count], entry, PATH_MAX_LEN);
+            count++;
+        }
+    }
+
+    if (count == 0) return false;
+
+    for (i = 0; i < path_dir_count; i++) {
+        uint32_t j;
+        for (j = 0; j < count; j++)
+            if (s_cmp(path_dirs[i], path_temp[j]) == 0) break;
+        if (j == count)
+            s_copy(path_dirs[kept++], path_dirs[i], PATH_MAX_LEN);
+    }
+    path_dir_count = kept;
+    return true;
+}
+
 static void path_load(void) {
     uint32_t len = 0;
     uint32_t start = 0;
@@ -1153,7 +1194,7 @@ static void cmd_grep(int argc, char **argv, const char *input, uint32_t input_le
 static void cmd_help(struct Output *out) {
     out_str(out, "built-in : cd ls mkdir cat cp rm mv find grep help\n");
     out_str(out, "proses   : exec <aplikasi>  ps  kill <PID>\n");
-    out_str(out, "variabel : export PATH=<dir>[:<dir>...]  export PATH+=<dir>\n");
+    out_str(out, "variabel : export PATH=<dir>[:...]  PATH+=<dir>  PATH-=<dir>\n");
     out_str(out, "aplikasi : jalankan lewat exec atau langsung namanya (dicari di PATH)\n");
     out_str(out, "pipeline : command1 | command2 | ...\n");
 }
@@ -1299,6 +1340,7 @@ static void cmd_kill(int argc, char **argv, struct Output *out) {
 static void cmd_export(int argc, char **argv, struct Output *out) {
     const char *spec;
     bool append = false;
+    bool remove = false;
     int rc;
 
     if (argc == 1 || (argc == 2 && s_cmp(argv[1], "PATH") == 0)) {
@@ -1306,12 +1348,15 @@ static void cmd_export(int argc, char **argv, struct Output *out) {
         return;
     }
     if (argc != 2) {
-        out_usage(out, "export [PATH|PATH=<dir>[:...]|PATH+=<dir>]");
+        out_usage(out, "export [PATH|PATH=<dir>[:...]|PATH+=<dir>|PATH-=<dir>]");
         return;
     }
 
     if (s_starts_with(argv[1], "PATH+=")) {
         append = true;
+        spec = argv[1] + 6;
+    } else if (s_starts_with(argv[1], "PATH-=")) {
+        remove = true;
         spec = argv[1] + 6;
     } else if (s_starts_with(argv[1], "PATH=")) {
         spec = argv[1] + 5;
@@ -1320,7 +1365,12 @@ static void cmd_export(int argc, char **argv, struct Output *out) {
         return;
     }
 
-    if (!path_set_spec(spec, append)) {
+    if (remove) {
+        if (!path_remove_spec(spec)) {
+            out_str(out, "export: daftar direktori tidak valid\n");
+            return;
+        }
+    } else if (!path_set_spec(spec, append)) {
         out_str(out, "export: daftar direktori tidak valid\n");
         return;
     }
@@ -1493,9 +1543,6 @@ int main(void) {
     path_load();
 
     syscall(SYSCALL_KEYBOARD_ACTIVATE, 0, 0, 0);
-
-    emit("konOSuba shell\n", 15, COLOR_DEFAULT);
-    emit("ketik 'help' untuk daftar perintah\n", 35, COLOR_DEFAULT);
 
     for (;;) {
         uint32_t len;
